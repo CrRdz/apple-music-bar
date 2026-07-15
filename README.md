@@ -8,6 +8,8 @@
 - 优先显示 LRC 时间轴歌词
 - 精确匹配失败时自动尝试简繁体标题和宽松搜索
 - 状态栏逐句同步，长歌词自动滚动
+- 菜单顶部提供封面、曲目信息、播放/暂停与下一首控制
+- 支持跟随系统、简体中文、English 和繁體中文界面
 - 未匹配到同步歌词时，按歌曲时长估算普通歌词进度
 - 点击歌词可进行上一首、播放/暂停、下一首和重新匹配
 - Apple Music 未启动时保持安静驻留
@@ -37,6 +39,16 @@ swift test
 ```bash
 APPLE_MUSIC_BAR_INTEGRATION_TESTS=1 swift test --filter LyricsRepositoryIntegrationTests
 ```
+
+## 发布
+
+推送 `v*` tag 后，[Release workflow](.github/workflows/release.yml) 会在 GitHub 的 macOS runner 上运行测试、构建 arm64+x86_64 通用应用、生成 SHA-256 校验文件并创建 GitHub Release。tag 必须与 `Resources/Info.plist` 中的版本一致。
+
+```bash
+git push origin main --tags
+```
+
+也可以在 GitHub Actions 页面手动运行工作流并填写已经存在的 tag；这适合补发旧版本。
 
 ## 歌词来源与隐私
 

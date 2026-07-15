@@ -3,6 +3,13 @@ import Foundation
 
 @MainActor
 final class StatusBarController: NSObject {
+    private enum UnavailableState {
+        case notRunning
+        case noTrack
+        case unauthorized
+        case failed(String)
+    }
+
     private let maximumWidth: CGFloat = 360
     private let horizontalPadding: CGFloat = 18
     private let marqueeInterval: TimeInterval = 0.16
@@ -10,17 +17,23 @@ final class StatusBarController: NSObject {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let musicClient = MusicAppClient()
     private let lyricsRepository = LyricsRepository()
+    private let nowPlayingView = NowPlayingMenuView()
 
-    private let trackMenuItem = NSMenuItem(title: "没有正在播放的歌曲", action: nil, keyEquivalent: "")
-    private let sourceMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    private let playPauseMenuItem = NSMenuItem(title: "播放 / 暂停", action: #selector(playPause), keyEquivalent: "")
+    private let refreshItem = NSMenuItem(title: "", action: #selector(refreshLyrics), keyEquivalent: "r")
+    private let languageItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let openMusicItem = NSMenuItem(title: "", action: #selector(openMusic), keyEquivalent: "")
+    private let quitItem = NSMenuItem(title: "", action: #selector(quit), keyEquivalent: "q")
+    private var languageMenuItems: [AppLanguage: NSMenuItem] = [:]
 
+    private var language = AppLanguage.load()
+    private var unavailableState: UnavailableState = .noTrack
     private var pollingTimer: Timer?
     private var marqueeTimer: Timer?
     private var isPolling = false
     private var currentTrack: TrackSnapshot?
     private var currentTimeline: LyricsTimeline?
     private var lyricsTask: Task<Void, Never>?
+    private var artworkTask: Task<Void, Never>?
 
     private var rawDisplayText = ""
     private var marqueeCharacters: [Character] = []
@@ -29,7 +42,7 @@ final class StatusBarController: NSObject {
     func start() {
         configureStatusItem()
         configureMenu()
-        setDisplayText("♪ Apple Music")
+        refreshLocalizedPresentation()
 
         pollingTimer = Timer.scheduledTimer(
             timeInterval: 0.5,
@@ -56,44 +69,65 @@ final class StatusBarController: NSObject {
         button.alignment = .center
         button.lineBreakMode = .byClipping
         button.toolTip = "Apple Music Bar"
-        button.setAccessibilityLabel("Apple Music 当前歌词")
     }
 
     private func configureMenu() {
         let menu = NSMenu()
-        trackMenuItem.isEnabled = false
-        sourceMenuItem.isEnabled = false
-        sourceMenuItem.isHidden = true
-        menu.addItem(trackMenuItem)
-        menu.addItem(sourceMenuItem)
+        menu.autoenablesItems = false
+
+        nowPlayingView.onPlayPause = { [weak self] in self?.send(.playPause) }
+        nowPlayingView.onNext = { [weak self] in self?.send(.nextTrack) }
+        let nowPlayingItem = NSMenuItem()
+        nowPlayingItem.view = nowPlayingView
+        menu.addItem(nowPlayingItem)
         menu.addItem(.separator())
 
-        let previousItem = NSMenuItem(title: "上一首", action: #selector(previousTrack), keyEquivalent: "")
-        previousItem.target = self
-        menu.addItem(previousItem)
-
-        playPauseMenuItem.target = self
-        menu.addItem(playPauseMenuItem)
-
-        let nextItem = NSMenuItem(title: "下一首", action: #selector(nextTrack), keyEquivalent: "")
-        nextItem.target = self
-        menu.addItem(nextItem)
-
-        menu.addItem(.separator())
-        let refreshItem = NSMenuItem(title: "重新匹配歌词", action: #selector(refreshLyrics), keyEquivalent: "r")
         refreshItem.target = self
         menu.addItem(refreshItem)
 
-        let openMusicItem = NSMenuItem(title: "打开 Apple Music", action: #selector(openMusic), keyEquivalent: "")
+        let languageMenu = NSMenu()
+        for option in AppLanguage.allCases {
+            let item = NSMenuItem(
+                title: option.menuTitle,
+                action: #selector(selectLanguage(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = option.rawValue
+            languageMenu.addItem(item)
+            languageMenuItems[option] = item
+        }
+        languageItem.submenu = languageMenu
+        menu.addItem(languageItem)
+
         openMusicItem.target = self
         menu.addItem(openMusicItem)
 
         menu.addItem(.separator())
-        let quitItem = NSMenuItem(title: "退出 Apple Music Bar", action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
 
         statusItem.menu = menu
+        updateLocalizedMenu()
+    }
+
+    private func updateLocalizedMenu() {
+        refreshItem.title = language.localized(.refreshLyrics)
+        languageItem.title = language.localized(.language)
+        openMusicItem.title = language.localized(.openAppleMusic)
+        quitItem.title = language.localized(.quit)
+        for option in AppLanguage.allCases {
+            languageMenuItems[option]?.title = option == .system
+                ? language.localized(.followSystem)
+                : option.menuTitle
+            languageMenuItems[option]?.state = option == language ? .on : .off
+        }
+        nowPlayingView.updateAccessibility(
+            play: language.localized(.play),
+            pause: language.localized(.pause),
+            next: language.localized(.next)
+        )
+        statusItem.button?.setAccessibilityLabel(language.localized(.accessibilityLyrics))
     }
 
     @objc private func pollMusic() {
@@ -111,41 +145,56 @@ final class StatusBarController: NSObject {
         switch result {
         case .notRunning:
             clearTrackState()
-            trackMenuItem.title = "Apple Music 未运行"
-            setDisplayText("♪ 打开 Apple Music")
+            unavailableState = .notRunning
+            refreshLocalizedPresentation()
 
         case .noTrack:
             clearTrackState()
-            trackMenuItem.title = "没有正在播放的歌曲"
-            setDisplayText("♪ Apple Music")
+            unavailableState = .noTrack
+            refreshLocalizedPresentation()
 
         case .unauthorized:
             clearTrackState()
-            trackMenuItem.title = "需要“自动化”权限"
-            setDisplayText("请允许控制“音乐”")
+            unavailableState = .unauthorized
+            refreshLocalizedPresentation()
 
         case .failed(let message):
             clearTrackState()
-            trackMenuItem.title = "读取失败：\(message)"
-            setDisplayText("无法读取 Apple Music")
+            unavailableState = .failed(message)
+            refreshLocalizedPresentation()
 
         case .track(let track):
             let didChangeTrack = currentTrack?.key != track.key
             currentTrack = track
-            trackMenuItem.title = track.displayName
-            playPauseMenuItem.title = track.state == .playing ? "暂停" : "播放"
+            updateNowPlayingCard(for: track)
 
             if didChangeTrack {
                 currentTimeline = nil
-                sourceMenuItem.isHidden = true
+                nowPlayingView.setArtwork(nil)
+                beginArtworkLookup(for: track)
                 beginLyricsLookup(for: track)
             }
+            refreshCurrentDisplayText()
+        }
+    }
 
-            if let line = currentTimeline?.line(at: track.position) {
-                setDisplayText(line.text)
-            } else {
-                setDisplayText(track.displayName)
-            }
+    private func updateNowPlayingCard(for track: TrackSnapshot) {
+        let subtitleParts = [track.artist, track.album].filter { !$0.isEmpty }
+        nowPlayingView.update(
+            title: language.displayText(track.title),
+            subtitle: language.displayText(subtitleParts.joined(separator: " — ")),
+            isPlaying: track.state == .playing,
+            controlsEnabled: true
+        )
+    }
+
+    private func beginArtworkLookup(for track: TrackSnapshot) {
+        artworkTask?.cancel()
+        let key = track.key
+        artworkTask = Task {
+            let data = await musicClient.currentArtworkData()
+            guard !Task.isCancelled, currentTrack?.key == key else { return }
+            nowPlayingView.setArtwork(data.flatMap(NSImage.init(data:)))
         }
     }
 
@@ -158,35 +207,72 @@ final class StatusBarController: NSObject {
             }
             let timeline = await lyricsRepository.lyrics(for: track)
             guard !Task.isCancelled, currentTrack?.key == key else { return }
-
             currentTimeline = timeline
-            if let timeline {
-                sourceMenuItem.title = timeline.source.rawValue
-                sourceMenuItem.isHidden = false
-                if let position = currentTrack?.position,
-                   let line = timeline.line(at: position) {
-                    setDisplayText(line.text)
-                }
-            } else {
-                sourceMenuItem.title = "没有匹配到歌词"
-                sourceMenuItem.isHidden = false
-            }
+            refreshCurrentDisplayText()
         }
     }
 
     private func clearTrackState() {
         lyricsTask?.cancel()
+        artworkTask?.cancel()
         lyricsTask = nil
+        artworkTask = nil
         currentTrack = nil
         currentTimeline = nil
-        sourceMenuItem.isHidden = true
-        playPauseMenuItem.title = "播放 / 暂停"
+        nowPlayingView.setArtwork(nil)
+    }
+
+    private func refreshLocalizedPresentation() {
+        updateLocalizedMenu()
+        if let currentTrack {
+            updateNowPlayingCard(for: currentTrack)
+            refreshCurrentDisplayText()
+            return
+        }
+
+        let title: String
+        let subtitle: String
+        let statusText: String
+        switch unavailableState {
+        case .notRunning:
+            title = language.localized(.musicNotRunning)
+            subtitle = language.localized(.musicNotRunningDetail)
+            statusText = language.localized(.openAppleMusicPrompt)
+        case .noTrack:
+            title = language.localized(.noTrack)
+            subtitle = language.localized(.noTrackDetail)
+            statusText = "♪ \(language.localized(.appleMusic))"
+        case .unauthorized:
+            title = language.localized(.automationRequired)
+            subtitle = language.localized(.automationDetail)
+            statusText = language.localized(.allowMusic)
+        case .failed(let message):
+            title = language.localized(.unableToRead)
+            subtitle = message
+            statusText = language.localized(.unableToRead)
+        }
+        nowPlayingView.update(
+            title: title,
+            subtitle: subtitle,
+            isPlaying: false,
+            controlsEnabled: false
+        )
+        setDisplayText(statusText)
+    }
+
+    private func refreshCurrentDisplayText() {
+        guard let currentTrack else { return }
+        if let line = currentTimeline?.line(at: currentTrack.position) {
+            setDisplayText(language.displayText(line.text))
+        } else {
+            setDisplayText(language.displayText(currentTrack.displayName))
+        }
     }
 
     private func setDisplayText(_ text: String) {
         let cleaned = text.replacingOccurrences(of: "\n", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let value = cleaned.isEmpty ? "♪ Apple Music" : cleaned
+        let value = cleaned.isEmpty ? "♪ \(language.localized(.appleMusic))" : cleaned
         guard value != rawDisplayText else { return }
 
         rawDisplayText = value
@@ -235,18 +321,6 @@ final class StatusBarController: NSObject {
         return ceil((text as NSString).size(withAttributes: [.font: font]).width)
     }
 
-    @objc private func previousTrack() {
-        send(.previousTrack)
-    }
-
-    @objc private func playPause() {
-        send(.playPause)
-    }
-
-    @objc private func nextTrack() {
-        send(.nextTrack)
-    }
-
     private func send(_ command: MusicCommand) {
         Task {
             await musicClient.send(command)
@@ -258,9 +332,18 @@ final class StatusBarController: NSObject {
     @objc private func refreshLyrics() {
         guard let currentTrack else { return }
         currentTimeline = nil
-        sourceMenuItem.title = "正在重新匹配歌词…"
-        sourceMenuItem.isHidden = false
+        refreshCurrentDisplayText()
         beginLyricsLookup(for: currentTrack, invalidate: true)
+    }
+
+    @objc private func selectLanguage(_ sender: NSMenuItem) {
+        guard
+            let rawValue = sender.representedObject as? String,
+            let selectedLanguage = AppLanguage(rawValue: rawValue)
+        else { return }
+        language = selectedLanguage
+        language.save()
+        refreshLocalizedPresentation()
     }
 
     @objc private func openMusic() {

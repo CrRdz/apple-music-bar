@@ -94,4 +94,25 @@ actor MusicAppClient {
         _ = NSAppleScript(source: source)?.executeAndReturnError(&errorInfo)
     }
 
+    func currentArtworkData() -> Data? {
+        guard !NSRunningApplication.runningApplications(
+            withBundleIdentifier: musicBundleIdentifier
+        ).isEmpty else { return nil }
+
+        let source = """
+        tell application "Music"
+            if player state is stopped then return missing value
+            try
+                return raw data of artwork 1 of current track
+            on error
+                return missing value
+            end try
+        end tell
+        """
+
+        var errorInfo: NSDictionary?
+        return NSAppleScript(source: source)?
+            .executeAndReturnError(&errorInfo)
+            .data
+    }
 }

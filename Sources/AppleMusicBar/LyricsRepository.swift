@@ -137,7 +137,7 @@ actor LyricsRepository {
         var request = URLRequest(url: url)
         request.timeoutInterval = 8
         request.cachePolicy = .returnCacheDataElseLoad
-        request.setValue("AppleMusicBar/0.1.1", forHTTPHeaderField: "User-Agent")
+        request.setValue("AppleMusicBar/0.2.0", forHTTPHeaderField: "User-Agent")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         return request
     }

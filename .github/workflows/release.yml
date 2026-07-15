@@ -1,0 +1,114 @@
+name: Release macOS app
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing version tag to publish, for example v0.2.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build universal app and publish release
+    runs-on: macos-15
+    env:
+      APP_NAME: AppleMusicBar
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate tag and bundle version
+        shell: zsh {0}
+        run: |
+          VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)"
+          if [[ "$RELEASE_TAG" != "v$VERSION" ]]; then
+            echo "Tag $RELEASE_TAG does not match Info.plist version $VERSION"
+            exit 1
+          fi
+
+      - name: Run tests
+        run: swift test
+
+      - name: Build universal application bundle
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          swift build -c release --arch arm64 --scratch-path .build/arm64
+          swift build -c release --arch x86_64 --scratch-path .build/x86_64
+          ARM_BIN_DIR="$(swift build -c release --arch arm64 --scratch-path .build/arm64 --show-bin-path)"
+          X86_BIN_DIR="$(swift build -c release --arch x86_64 --scratch-path .build/x86_64 --show-bin-path)"
+          APP_PATH="$PWD/dist/$APP_NAME.app"
+
+          rm -rf "$APP_PATH"
+          mkdir -p "$APP_PATH/Contents/MacOS"
+          lipo -create \
+            "$ARM_BIN_DIR/$APP_NAME" \
+            "$X86_BIN_DIR/$APP_NAME" \
+            -output "$APP_PATH/Contents/MacOS/$APP_NAME"
+          cp Resources/Info.plist "$APP_PATH/Contents/Info.plist"
+          chmod +x "$APP_PATH/Contents/MacOS/$APP_NAME"
+          codesign --force --deep --sign - "$APP_PATH"
+
+          ARCHS="$(lipo -archs "$APP_PATH/Contents/MacOS/$APP_NAME")"
+          [[ "$ARCHS" == *arm64* && "$ARCHS" == *x86_64* ]]
+
+      - name: Package release disk image
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          DMG_NAME="$APP_NAME-$RELEASE_TAG-macOS-universal.dmg"
+          DMG_ROOT="$PWD/dist/dmg-root"
+
+          rm -rf "$DMG_ROOT"
+          mkdir -p "$DMG_ROOT" release
+          ditto "dist/$APP_NAME.app" "$DMG_ROOT/$APP_NAME.app"
+          ln -s /Applications "$DMG_ROOT/Applications"
+          hdiutil create \
+            -volname "$APP_NAME $RELEASE_TAG" \
+            -srcfolder "$DMG_ROOT" \
+            -format UDZO \
+            -ov \
+            "release/$DMG_NAME"
+
+          cd release
+          shasum -a 256 "$DMG_NAME" > "$DMG_NAME.sha256"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          DMG_NAME="$APP_NAME-$RELEASE_TAG-macOS-universal.dmg"
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release/* --clobber
+            while IFS= read -r asset; do
+              case "$asset" in
+                "$DMG_NAME"|"$DMG_NAME.sha256") ;;
+                *) gh release delete-asset "$RELEASE_TAG" "$asset" --yes ;;
+              esac
+            done < <(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')
+          else
+            gh release create "$RELEASE_TAG" release/* \
+              --verify-tag \
+              --generate-notes \
+              --title "Apple Music Bar $RELEASE_TAG"
+          fi
