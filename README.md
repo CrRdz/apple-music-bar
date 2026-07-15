@@ -6,6 +6,7 @@
 
 - 读取 Apple Music 当前曲目与播放进度
 - 优先显示 LRC 时间轴歌词
+- 精确匹配失败时自动尝试简繁体标题和宽松搜索
 - 状态栏逐句同步，长歌词自动滚动
 - 未匹配到同步歌词时，按歌曲时长估算普通歌词进度
 - 点击歌词可进行上一首、播放/暂停、下一首和重新匹配
@@ -29,6 +30,12 @@ open dist/AppleMusicBar.app
 
 ```bash
 swift test
+```
+
+可选的 LRCLIB 在线匹配测试：
+
+```bash
+APPLE_MUSIC_BAR_INTEGRATION_TESTS=1 swift test --filter LyricsRepositoryIntegrationTests
 ```
 
 ## 歌词来源与隐私

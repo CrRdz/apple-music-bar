@@ -7,6 +7,7 @@ actor LyricsRepository {
     }
 
     private struct LRCLIBLyrics: Decodable {
+        let id: Int?
         let trackName: String?
         let artistName: String?
         let albumName: String?
@@ -56,43 +57,30 @@ actor LyricsRepository {
     }
 
     private func fetchFromLRCLIB(track: TrackSnapshot) async -> LyricsTimeline? {
-        if let exact = try? await exactMatch(for: track),
-           let timeline = makeTimeline(from: exact, track: track) {
+        let primaryCandidates = await primarySearchCandidates(for: track)
+        if let timeline = bestTimeline(in: primaryCandidates, for: track) {
             return timeline
         }
 
-        guard let candidates = try? await search(for: track) else { return nil }
-        let bestCandidate = candidates.max { left, right in
-            score(left, for: track) < score(right, for: track)
+        let preferredTerm = TrackMetadataMatcher.preferredTitleSearchTerm(track.title)
+        let remainingVariants = TrackMetadataMatcher.titleSearchVariants(track.title)
+            .filter { $0.caseInsensitiveCompare(preferredTerm) != .orderedSame }
+        for variant in remainingVariants {
+            let candidates = (try? await Self.search(queryItems: [
+                URLQueryItem(name: "q", value: variant)
+            ])) ?? []
+            if let timeline = bestTimeline(in: candidates, for: track) {
+                return timeline
+            }
         }
-        guard let bestCandidate, score(bestCandidate, for: track) >= 40 else { return nil }
-        return makeTimeline(from: bestCandidate, track: track)
+        return nil
     }
 
-    private func exactMatch(for track: TrackSnapshot) async throws -> LRCLIBLyrics? {
-        var components = baseComponents(path: "/api/get")
-        components.queryItems = [
-            URLQueryItem(name: "track_name", value: track.title),
-            URLQueryItem(name: "artist_name", value: track.artist),
-            URLQueryItem(name: "album_name", value: track.album),
-            URLQueryItem(name: "duration", value: String(Int(track.duration.rounded())))
-        ]
-
-        guard let url = components.url else { return nil }
-        let (data, response) = try await URLSession.shared.data(for: request(for: url))
-        guard let httpResponse = response as? HTTPURLResponse else { return nil }
-        if httpResponse.statusCode == 404 { return nil }
-        guard (200..<300).contains(httpResponse.statusCode) else { return nil }
-        return try JSONDecoder().decode(LRCLIBLyrics.self, from: data)
-    }
-
-    private func search(for track: TrackSnapshot) async throws -> [LRCLIBLyrics] {
+    private static func search(
+        queryItems: [URLQueryItem]
+    ) async throws -> [LRCLIBLyrics] {
         var components = baseComponents(path: "/api/search")
-        components.queryItems = [
-            URLQueryItem(name: "track_name", value: track.title),
-            URLQueryItem(name: "artist_name", value: track.artist),
-            URLQueryItem(name: "album_name", value: track.album)
-        ]
+        components.queryItems = queryItems
 
         guard let url = components.url else { return [] }
         let (data, response) = try await URLSession.shared.data(for: request(for: url))
@@ -103,7 +91,41 @@ actor LyricsRepository {
         return try JSONDecoder().decode([LRCLIBLyrics].self, from: data)
     }
 
-    private func baseComponents(path: String) -> URLComponents {
+    private func primarySearchCandidates(for track: TrackSnapshot) async -> [LRCLIBLyrics] {
+        let preferredTerm = TrackMetadataMatcher.preferredTitleSearchTerm(track.title)
+        let queryGroups = [[
+            URLQueryItem(name: "track_name", value: track.title),
+            URLQueryItem(name: "artist_name", value: track.artist),
+            URLQueryItem(name: "album_name", value: track.album)
+        ], [
+            URLQueryItem(name: "q", value: preferredTerm)
+        ]]
+
+        let results = await withTaskGroup(of: [LRCLIBLyrics].self) { group in
+            for queryItems in queryGroups {
+                group.addTask {
+                    (try? await Self.search(queryItems: queryItems)) ?? []
+                }
+            }
+
+            var collected: [LRCLIBLyrics] = []
+            for await candidates in group {
+                collected.append(contentsOf: candidates)
+            }
+            return collected
+        }
+
+        var seen = Set<String>()
+        return results.filter { result in
+            let identity = result.id.map(String.init)
+                ?? [result.trackName, result.artistName, result.albumName]
+                    .compactMap { $0 }
+                    .joined(separator: "|")
+            return seen.insert(identity).inserted
+        }
+    }
+
+    private static func baseComponents(path: String) -> URLComponents {
         var components = URLComponents()
         components.scheme = "https"
         components.host = "lrclib.net"
@@ -111,11 +133,11 @@ actor LyricsRepository {
         return components
     }
 
-    private func request(for url: URL) -> URLRequest {
+    private static func request(for url: URL) -> URLRequest {
         var request = URLRequest(url: url)
         request.timeoutInterval = 8
         request.cachePolicy = .returnCacheDataElseLoad
-        request.setValue("AppleMusicBar/0.1.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("AppleMusicBar/0.1.1", forHTTPHeaderField: "User-Agent")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         return request
     }
@@ -141,19 +163,27 @@ actor LyricsRepository {
 
     private func score(_ result: LRCLIBLyrics, for track: TrackSnapshot) -> Int {
         var value = 0
-        if normalized(result.trackName) == normalized(track.title) { value += 50 }
-        if normalized(result.artistName) == normalized(track.artist) { value += 30 }
-        if normalized(result.albumName) == normalized(track.album) { value += 10 }
+        if TrackMetadataMatcher.equivalent(result.trackName, track.title) { value += 50 }
+        if TrackMetadataMatcher.equivalent(result.artistName, track.artist) { value += 30 }
+        if TrackMetadataMatcher.equivalent(result.albumName, track.album) { value += 10 }
         if let duration = result.duration,
            abs(duration - track.duration) <= 3 { value += 10 }
         if result.syncedLyrics?.isEmpty == false { value += 5 }
         return value
     }
 
-    private func normalized(_ value: String?) -> String {
-        (value ?? "")
-            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
+    private func bestTimeline(
+        in candidates: [LRCLIBLyrics],
+        for track: TrackSnapshot
+    ) -> LyricsTimeline? {
+        let rankedCandidates = candidates.sorted {
+            score($0, for: track) > score($1, for: track)
+        }
+        for candidate in rankedCandidates where score(candidate, for: track) >= 40 {
+            if let timeline = makeTimeline(from: candidate, track: track) {
+                return timeline
+            }
+        }
+        return nil
     }
 }
