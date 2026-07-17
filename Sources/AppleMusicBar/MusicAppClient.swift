@@ -94,6 +94,232 @@ actor MusicAppClient {
         _ = NSAppleScript(source: source)?.executeAndReturnError(&errorInfo)
     }
 
+    func seek(to position: TimeInterval) {
+        let safePosition = max(0, position)
+        let seconds = String(
+            format: "%.3f",
+            locale: Locale(identifier: "en_US_POSIX"),
+            safePosition
+        )
+        let source = """
+        tell application "Music"
+            set player position to \(seconds)
+        end tell
+        """
+
+        var errorInfo: NSDictionary?
+        _ = NSAppleScript(source: source)?.executeAndReturnError(&errorInfo)
+    }
+
+    func playlistPersistentID(
+        named name: String,
+        matching tracks: [LibraryTrackSnapshot]
+    ) -> String? {
+        let sampleTracks = Array(tracks.prefix(3))
+        guard !sampleTracks.isEmpty else { return nil }
+
+        let escapedName = escapedAppleScriptText(name)
+        let titles = appleScriptList(sampleTracks.map(\.title))
+        let artists = appleScriptList(sampleTracks.map(\.artist))
+        let albums = appleScriptList(sampleTracks.map(\.album))
+        let source = """
+        tell application "Music"
+            set candidatePlaylists to every playlist whose name is "\(escapedName)"
+            if (count of candidatePlaylists) is 0 then return ""
+            if (count of candidatePlaylists) is 1 then
+                try
+                    return persistent ID of item 1 of candidatePlaylists
+                on error
+                    return ""
+                end try
+            end if
+
+            set targetTitles to \(titles)
+            set targetArtists to \(artists)
+            set targetAlbums to \(albums)
+            set expectedTrackCount to \(tracks.count)
+            set bestPlaylist to missing value
+            set bestScore to -1
+            set bestCountDelta to 2147483647
+
+            repeat with candidatePlaylist in candidatePlaylists
+                try
+                    set candidateTrackCount to count of tracks of candidatePlaylist
+                    set candidateScore to 0
+
+                    repeat with targetIndex from 1 to count of targetTitles
+                        set targetTitle to item targetIndex of targetTitles
+                        set targetArtist to item targetIndex of targetArtists
+                        set targetAlbum to item targetIndex of targetAlbums
+
+                        set matchingTracks to search candidatePlaylist for targetTitle only names
+                        repeat with candidateTrack in matchingTracks
+                            set titleMatches to ((name of candidateTrack) is targetTitle)
+                            set artistMatches to (targetArtist is "") or ((artist of candidateTrack) is targetArtist)
+                            set albumMatches to (targetAlbum is "") or ((album of candidateTrack) is targetAlbum)
+                            if titleMatches and artistMatches and albumMatches then
+                                set candidateScore to candidateScore + 1
+                                exit repeat
+                            end if
+                        end repeat
+                    end repeat
+
+                    set countDelta to candidateTrackCount - expectedTrackCount
+                    if countDelta < 0 then set countDelta to -countDelta
+                    if candidateScore > bestScore or (candidateScore is bestScore and countDelta < bestCountDelta) then
+                        set bestPlaylist to candidatePlaylist
+                        set bestScore to candidateScore
+                        set bestCountDelta to countDelta
+                    end if
+                end try
+            end repeat
+
+            if bestPlaylist is missing value or bestScore is 0 then return ""
+            try
+                return persistent ID of bestPlaylist
+            on error
+                return ""
+            end try
+        end tell
+        """
+
+        var errorInfo: NSDictionary?
+        let value = NSAppleScript(source: source)?
+            .executeAndReturnError(&errorInfo)
+            .stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return value?.isEmpty == false ? value : nil
+    }
+
+    func playPlaylist(named name: String, persistentID: String? = nil) {
+        let escapedName = escapedAppleScriptText(name)
+        let playlistQuery = playlistQuery(named: escapedName, persistentID: persistentID)
+        let source = """
+        tell application "Music"
+            set matchingPlaylists to \(playlistQuery)
+            if (count of matchingPlaylists) > 0 then
+                play item 1 of matchingPlaylists
+            end if
+        end tell
+        """
+
+        var errorInfo: NSDictionary?
+        _ = NSAppleScript(source: source)?.executeAndReturnError(&errorInfo)
+    }
+
+    func playTrack(
+        _ track: LibraryTrackSnapshot,
+        fallbackIndex index: Int,
+        inPlaylistNamed name: String,
+        playlistPersistentID: String? = nil
+    ) {
+        guard index >= 0 else { return }
+        let escapedName = escapedAppleScriptText(name)
+        let escapedTitle = escapedAppleScriptText(track.title)
+        let escapedArtist = escapedAppleScriptText(track.artist)
+        let escapedAlbum = escapedAppleScriptText(track.album)
+        let playlistQuery = playlistQuery(
+            named: escapedName,
+            persistentID: playlistPersistentID
+        )
+        let appleScriptIndex = index + 1
+        let source = """
+        tell application "Music"
+            set matchingPlaylists to \(playlistQuery)
+            if (count of matchingPlaylists) > 0 then
+                set selectedPlaylist to item 1 of matchingPlaylists
+                set targetTitle to "\(escapedTitle)"
+                set targetArtist to "\(escapedArtist)"
+                set targetAlbum to "\(escapedAlbum)"
+                set selectedTrack to missing value
+                set titleFallbackTrack to missing value
+                set matchingTracks to search selectedPlaylist for targetTitle only names
+
+                repeat with candidateTrack in matchingTracks
+                    set titleMatches to false
+                    set artistMatches to (targetArtist is "")
+                    set albumMatches to (targetAlbum is "")
+                    try
+                        set titleMatches to ((name of candidateTrack) is targetTitle)
+                        if targetArtist is not "" then
+                            set artistMatches to ((artist of candidateTrack) is targetArtist)
+                        end if
+                        if targetAlbum is not "" then
+                            set albumMatches to ((album of candidateTrack) is targetAlbum)
+                        end if
+                    end try
+
+                    if titleMatches and titleFallbackTrack is missing value then
+                        set titleFallbackTrack to candidateTrack
+                    end if
+                    if titleMatches and artistMatches and albumMatches then
+                        set selectedTrack to candidateTrack
+                        exit repeat
+                    end if
+                end repeat
+
+                if selectedTrack is missing value then
+                    set selectedTrack to titleFallbackTrack
+                end if
+                if selectedTrack is missing value and (count of tracks of selectedPlaylist) >= \(appleScriptIndex) then
+                    set selectedTrack to track \(appleScriptIndex) of selectedPlaylist
+                end if
+                if selectedTrack is not missing value then
+                    play selectedTrack
+                end if
+            end if
+        end tell
+        """
+
+        var errorInfo: NSDictionary?
+        _ = NSAppleScript(source: source)?.executeAndReturnError(&errorInfo)
+    }
+
+    private func escapedAppleScriptText(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+    }
+
+    private func appleScriptList(_ values: [String]) -> String {
+        let items = values.map { "\"\(escapedAppleScriptText($0))\"" }
+        return "{\(items.joined(separator: ", "))}"
+    }
+
+    private func playlistQuery(named escapedName: String, persistentID: String?) -> String {
+        if let persistentID, !persistentID.isEmpty {
+            let escapedID = escapedAppleScriptText(persistentID)
+            return "every playlist whose persistent ID is \"\(escapedID)\""
+        }
+        return "every playlist whose name is \"\(escapedName)\""
+    }
+
+    func currentPlaylistName() -> String? {
+        guard !NSRunningApplication.runningApplications(
+            withBundleIdentifier: musicBundleIdentifier
+        ).isEmpty else { return nil }
+
+        let source = """
+        tell application "Music"
+            if player state is stopped then return ""
+            try
+                return name of current playlist
+            on error
+                return ""
+            end try
+        end tell
+        """
+
+        var errorInfo: NSDictionary?
+        let value = NSAppleScript(source: source)?
+            .executeAndReturnError(&errorInfo)
+            .stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return value?.isEmpty == false ? value : nil
+    }
+
     func currentArtworkData() -> Data? {
         guard !NSRunningApplication.runningApplications(
             withBundleIdentifier: musicBundleIdentifier
