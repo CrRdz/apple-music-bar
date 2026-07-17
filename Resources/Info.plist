@@ -17,11 +17,13 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.2.0</string>
+    <string>0.3.0</string>
     <key>CFBundleVersion</key>
-    <string>3</string>
+    <string>4</string>
     <key>LSMinimumSystemVersion</key>
-    <string>13.0</string>
+    <string>14.0</string>
+    <key>NSAppleMusicUsageDescription</key>
+    <string>用于读取你的 Apple Music 资料库、播放列表和播放列表封面。</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSAppleEventsUsageDescription</key>

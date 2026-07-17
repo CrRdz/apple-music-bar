@@ -71,17 +71,41 @@ enum AppLanguage: String, CaseIterable, Sendable {
         .appleMusic: "Apple Music",
         .openAppleMusicPrompt: "♪ 打开 Apple Music",
         .musicNotRunning: "Apple Music 未运行",
-        .musicNotRunningDetail: "打开 Apple Music 以显示歌词",
         .noTrack: "没有正在播放的歌曲",
-        .noTrackDetail: "请在 Apple Music 中播放歌曲",
         .automationRequired: "需要“自动化”权限",
-        .automationDetail: "请允许 Apple Music Bar 控制“音乐”",
         .allowMusic: "请允许控制“音乐”",
         .unableToRead: "无法读取 Apple Music",
+        .readFailed: "读取失败",
+        .previous: "上一首",
         .play: "播放",
         .pause: "暂停",
         .next: "下一首",
         .refreshLyrics: "重新匹配歌词",
+        .library: "资料库",
+        .playlists: "播放列表",
+        .loadingLibrary: "正在读取资料库…",
+        .emptyPlaylists: "资料库中没有播放列表",
+        .noVisiblePlaylists: "没有启用显示的播放列表",
+        .musicKitAccessRequired: "需要 Apple Music 资料库权限",
+        .reloadLibrary: "重新载入资料库",
+        .libraryUnavailable: "无法读取资料库",
+        .choosePlaylist: "选择播放列表",
+        .songs: "歌曲",
+        .artist: "艺人",
+        .loadingTracks: "正在读取歌曲…",
+        .emptyTracks: "这个播放列表中没有歌曲",
+        .swipePlaylists: "双指左右滑动切换播放列表",
+        .playlistSettings: "更多选项",
+        .playPlaylist: "播放这个列表",
+        .playlistVisibility: "显示播放列表",
+        .showTrackList: "显示歌曲列表",
+        .trackListOff: "关闭",
+        .trackListVertical: "垂直列表",
+        .trackListHorizontal: "横向封面",
+        .showLyrics: "查看歌词",
+        .hideLyrics: "关闭歌词",
+        .loadingLyrics: "正在载入歌词…",
+        .lyricsUnavailable: "暂时没有可用歌词",
         .language: "语言",
         .followSystem: "跟随系统",
         .openAppleMusic: "打开 Apple Music",
@@ -93,17 +117,41 @@ enum AppLanguage: String, CaseIterable, Sendable {
         .appleMusic: "Apple Music",
         .openAppleMusicPrompt: "♪ 開啟 Apple Music",
         .musicNotRunning: "Apple Music 未執行",
-        .musicNotRunningDetail: "開啟 Apple Music 以顯示歌詞",
         .noTrack: "沒有正在播放的歌曲",
-        .noTrackDetail: "請在 Apple Music 中播放歌曲",
         .automationRequired: "需要「自動化」權限",
-        .automationDetail: "請允許 Apple Music Bar 控制「音樂」",
         .allowMusic: "請允許控制「音樂」",
         .unableToRead: "無法讀取 Apple Music",
+        .readFailed: "讀取失敗",
+        .previous: "上一首",
         .play: "播放",
         .pause: "暫停",
         .next: "下一首",
         .refreshLyrics: "重新配對歌詞",
+        .library: "資料庫",
+        .playlists: "播放列表",
+        .loadingLibrary: "正在讀取資料庫…",
+        .emptyPlaylists: "資料庫中沒有播放列表",
+        .noVisiblePlaylists: "沒有啟用顯示的播放列表",
+        .musicKitAccessRequired: "需要 Apple Music 資料庫權限",
+        .reloadLibrary: "重新載入資料庫",
+        .libraryUnavailable: "無法讀取資料庫",
+        .choosePlaylist: "選擇播放列表",
+        .songs: "歌曲",
+        .artist: "藝人",
+        .loadingTracks: "正在讀取歌曲…",
+        .emptyTracks: "這個播放列表中沒有歌曲",
+        .swipePlaylists: "雙指左右滑動切換播放列表",
+        .playlistSettings: "更多選項",
+        .playPlaylist: "播放這個列表",
+        .playlistVisibility: "顯示播放列表",
+        .showTrackList: "顯示歌曲列表",
+        .trackListOff: "關閉",
+        .trackListVertical: "垂直列表",
+        .trackListHorizontal: "橫向封面",
+        .showLyrics: "查看歌詞",
+        .hideLyrics: "關閉歌詞",
+        .loadingLyrics: "正在載入歌詞…",
+        .lyricsUnavailable: "暫時沒有可用歌詞",
         .language: "語言",
         .followSystem: "跟隨系統",
         .openAppleMusic: "開啟 Apple Music",
@@ -115,17 +163,41 @@ enum AppLanguage: String, CaseIterable, Sendable {
         .appleMusic: "Apple Music",
         .openAppleMusicPrompt: "♪ Open Apple Music",
         .musicNotRunning: "Apple Music is not running",
-        .musicNotRunningDetail: "Open Apple Music to show lyrics",
         .noTrack: "Nothing is playing",
-        .noTrackDetail: "Play a song in Apple Music",
         .automationRequired: "Automation permission required",
-        .automationDetail: "Allow Apple Music Bar to control Music",
         .allowMusic: "Allow access to Music",
         .unableToRead: "Unable to read Apple Music",
+        .readFailed: "Read failed",
+        .previous: "Previous",
         .play: "Play",
         .pause: "Pause",
         .next: "Next",
         .refreshLyrics: "Rematch Lyrics",
+        .library: "Library",
+        .playlists: "Playlists",
+        .loadingLibrary: "Loading Library…",
+        .emptyPlaylists: "No playlists in Library",
+        .noVisiblePlaylists: "No playlists are enabled for display",
+        .musicKitAccessRequired: "Apple Music Library access required",
+        .reloadLibrary: "Reload Library",
+        .libraryUnavailable: "Unable to load Library",
+        .choosePlaylist: "Choose a Playlist",
+        .songs: "Song",
+        .artist: "Artist",
+        .loadingTracks: "Loading songs…",
+        .emptyTracks: "This playlist has no songs",
+        .swipePlaylists: "Swipe horizontally with two fingers",
+        .playlistSettings: "More Options",
+        .playPlaylist: "Play This Playlist",
+        .playlistVisibility: "Visible Playlists",
+        .showTrackList: "Show Song List",
+        .trackListOff: "Off",
+        .trackListVertical: "Vertical List",
+        .trackListHorizontal: "Horizontal Covers",
+        .showLyrics: "Show Lyrics",
+        .hideLyrics: "Hide Lyrics",
+        .loadingLyrics: "Loading lyrics…",
+        .lyricsUnavailable: "No lyrics available",
         .language: "Language",
         .followSystem: "Follow System",
         .openAppleMusic: "Open Apple Music",
@@ -138,17 +210,41 @@ enum AppStringKey: Hashable {
     case appleMusic
     case openAppleMusicPrompt
     case musicNotRunning
-    case musicNotRunningDetail
     case noTrack
-    case noTrackDetail
     case automationRequired
-    case automationDetail
     case allowMusic
     case unableToRead
+    case readFailed
+    case previous
     case play
     case pause
     case next
     case refreshLyrics
+    case library
+    case playlists
+    case loadingLibrary
+    case emptyPlaylists
+    case noVisiblePlaylists
+    case musicKitAccessRequired
+    case reloadLibrary
+    case libraryUnavailable
+    case choosePlaylist
+    case songs
+    case artist
+    case loadingTracks
+    case emptyTracks
+    case swipePlaylists
+    case playlistSettings
+    case playPlaylist
+    case playlistVisibility
+    case showTrackList
+    case trackListOff
+    case trackListVertical
+    case trackListHorizontal
+    case showLyrics
+    case hideLyrics
+    case loadingLyrics
+    case lyricsUnavailable
     case language
     case followSystem
     case openAppleMusic
