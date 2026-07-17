@@ -25,6 +25,7 @@ jobs:
     env:
       APP_NAME: AppleMusicBar
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      MUSICKIT_BUNDLE_ID: ${{ secrets.MUSICKIT_BUNDLE_ID }}
 
     steps:
       - name: Check out release tag
@@ -46,6 +47,54 @@ jobs:
       - name: Run tests
         run: swift test
 
+      - name: Configure Developer ID signing
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.DEVELOPER_ID_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.BUILD_KEYCHAIN_PASSWORD }}
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          if [[ -z "$CERTIFICATE_BASE64" && -z "$CERTIFICATE_PASSWORD" && -z "$KEYCHAIN_PASSWORD" ]]; then
+            echo "CODE_SIGN_IDENTITY=-" >> "$GITHUB_ENV"
+            echo "Developer ID secrets are not configured; building an ad-hoc signed app."
+            exit 0
+          fi
+          if [[ -z "$CERTIFICATE_BASE64" || -z "$CERTIFICATE_PASSWORD" || -z "$KEYCHAIN_PASSWORD" ]]; then
+            echo "Developer ID signing secrets are only partially configured."
+            exit 1
+          fi
+          if [[ -z "$MUSICKIT_BUNDLE_ID" ]]; then
+            echo "MUSICKIT_BUNDLE_ID is required for a MusicKit-enabled signed release."
+            exit 1
+          fi
+
+          CERTIFICATE_PATH="$RUNNER_TEMP/developer-id.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/apple-music-bar.keychain-db"
+          print -rn -- "$CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" \
+            -P "$CERTIFICATE_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk -F '\"' 'NR == 1 { print $2 }')"
+          if [[ -z "$IDENTITY" ]]; then
+            echo "No code-signing identity was found in the imported certificate."
+            exit 1
+          fi
+          echo "CODE_SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+
       - name: Build universal application bundle
         shell: zsh {0}
         run: |
@@ -63,8 +112,23 @@ jobs:
             "$X86_BIN_DIR/$APP_NAME" \
             -output "$APP_PATH/Contents/MacOS/$APP_NAME"
           cp Resources/Info.plist "$APP_PATH/Contents/Info.plist"
+          if [[ -n "$MUSICKIT_BUNDLE_ID" ]]; then
+            /usr/libexec/PlistBuddy \
+              -c "Set :CFBundleIdentifier $MUSICKIT_BUNDLE_ID" \
+              "$APP_PATH/Contents/Info.plist"
+          fi
           chmod +x "$APP_PATH/Contents/MacOS/$APP_NAME"
-          codesign --force --deep --sign - "$APP_PATH"
+          if [[ "$CODE_SIGN_IDENTITY" == "-" ]]; then
+            codesign --force --deep --sign - "$APP_PATH"
+          else
+            codesign \
+              --force \
+              --deep \
+              --options runtime \
+              --timestamp \
+              --sign "$CODE_SIGN_IDENTITY" \
+              "$APP_PATH"
+          fi
 
           ARCHS="$(lipo -archs "$APP_PATH/Contents/MacOS/$APP_NAME")"
           [[ "$ARCHS" == *arm64* && "$ARCHS" == *x86_64* ]]
