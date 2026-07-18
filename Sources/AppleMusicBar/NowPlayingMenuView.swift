@@ -1,7 +1,48 @@
 import AppKit
+import QuartzCore
+
+@MainActor
+final class PlaybackToggleButton: NSButton {
+    private(set) var displayedSymbolName: String?
+    private(set) var transitionCount = 0
+
+    func setPlaybackState(
+        isPlaying: Bool,
+        configuration: NSImage.SymbolConfiguration,
+        animated: Bool
+    ) {
+        let symbolName = isPlaying ? "pause.fill" : "play.fill"
+        guard displayedSymbolName != symbolName else { return }
+
+        let shouldAnimate = animated && displayedSymbolName != nil
+        if shouldAnimate {
+            wantsLayer = true
+            let fade = CATransition()
+            fade.type = .fade
+            fade.duration = 0.16
+            fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            layer?.add(fade, forKey: "playback-symbol-fade")
+
+            let pulse = CAKeyframeAnimation(keyPath: "transform.scale")
+            pulse.values = [1, 0.88, 1.04, 1]
+            pulse.keyTimes = [0, 0.28, 0.7, 1]
+            pulse.duration = 0.22
+            pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            layer?.add(pulse, forKey: "playback-symbol-pulse")
+            transitionCount += 1
+        }
+
+        displayedSymbolName = symbolName
+        image = NSImage(
+            systemSymbolName: symbolName,
+            accessibilityDescription: nil
+        )?.withSymbolConfiguration(configuration)
+    }
+}
 
 @MainActor
 final class NowPlayingMenuView: NSView {
+    var onTrackListToggle: (() -> Void)?
     var onPrevious: (() -> Void)?
     var onPlayPause: (() -> Void)?
     var onNext: (() -> Void)?
@@ -17,18 +58,22 @@ final class NowPlayingMenuView: NSView {
     private let elapsedLabel = NSTextField(labelWithString: "0:00")
     private let remainingLabel = NSTextField(labelWithString: "−0:00")
     private let progressView = PlaybackProgressView()
+    private let trackListButton = NSButton()
     private let previousButton = NSButton()
-    private let playPauseButton = NSButton()
+    private let playPauseButton = PlaybackToggleButton()
     private let nextButton = NSButton()
     private let lyricsButton = NSButton()
 
     private var isPlaying = false
+    private var isShowingTrackList = false
     private var isShowingLyrics = false
     private var currentDuration: TimeInterval = 0
     private var previousAccessibilityTitle = "Previous"
     private var playAccessibilityTitle = "Play"
     private var pauseAccessibilityTitle = "Pause"
     private var nextAccessibilityTitle = "Next"
+    private var showTrackListAccessibilityTitle = "Show Song List"
+    private var hideTrackListAccessibilityTitle = "Hide Song List"
     private var showLyricsAccessibilityTitle = "Show Lyrics"
     private var hideLyricsAccessibilityTitle = "Hide Lyrics"
 
@@ -61,6 +106,7 @@ final class NowPlayingMenuView: NSView {
         titleLabel.stringValue = title
         subtitleLabel.stringValue = subtitle
         subtitleLabel.isHidden = subtitle.isEmpty
+        let playbackStateChanged = self.isPlaying != isPlaying
         self.isPlaying = isPlaying
         previousButton.isEnabled = controlsEnabled
         playPauseButton.isEnabled = controlsEnabled
@@ -68,7 +114,9 @@ final class NowPlayingMenuView: NSView {
         progressView.isEnabled = controlsEnabled && duration > 0
         currentDuration = max(0, duration)
         pulseView.setPlaying(isPlaying && controlsEnabled)
-        updateControlImages()
+        updateControlImages(
+            animatePlayPause: playbackStateChanged && controlsEnabled
+        )
         updateProgress(position: position, duration: duration)
         setAccessibilityLabel(subtitle.isEmpty ? title : "\(title), \(subtitle)")
     }
@@ -79,14 +127,24 @@ final class NowPlayingMenuView: NSView {
         pause: String,
         next: String,
         showLyrics: String = "Show Lyrics",
-        hideLyrics: String = "Hide Lyrics"
+        hideLyrics: String = "Hide Lyrics",
+        showTrackList: String = "Show Song List",
+        hideTrackList: String = "Hide Song List"
     ) {
         previousAccessibilityTitle = previous
         playAccessibilityTitle = play
         pauseAccessibilityTitle = pause
         nextAccessibilityTitle = next
+        showTrackListAccessibilityTitle = showTrackList
+        hideTrackListAccessibilityTitle = hideTrackList
         showLyricsAccessibilityTitle = showLyrics
         hideLyricsAccessibilityTitle = hideLyrics
+        updateControlImages()
+    }
+
+    func setTrackListVisible(_ visible: Bool) {
+        guard visible != isShowingTrackList else { return }
+        isShowingTrackList = visible
         updateControlImages()
     }
 
@@ -101,7 +159,7 @@ final class NowPlayingMenuView: NSView {
             artworkView.image = image
             artworkView.imageScaling = .scaleAxesIndependently
             artworkView.contentTintColor = nil
-            pulseView.accentColor = ArtworkAccentColor.extract(from: image)
+            pulseView.setAccentColor(ArtworkAccentColor.extract(from: image))
         } else {
             artworkView.image = NSImage(
                 systemSymbolName: "music.note",
@@ -109,7 +167,7 @@ final class NowPlayingMenuView: NSView {
             )
             artworkView.imageScaling = .scaleProportionallyDown
             artworkView.contentTintColor = .secondaryLabelColor
-            pulseView.accentColor = .secondaryLabelColor
+            pulseView.setAccentColor(nil)
         }
     }
 
@@ -160,10 +218,12 @@ final class NowPlayingMenuView: NSView {
         }
         addSubview(progressView)
 
+        configureButton(trackListButton, action: #selector(trackListPressed))
         configureButton(previousButton, action: #selector(previousPressed))
         configureButton(playPauseButton, action: #selector(playPausePressed))
         configureButton(nextButton, action: #selector(nextPressed))
         configureButton(lyricsButton, action: #selector(lyricsPressed))
+        addSubview(trackListButton)
         addSubview(previousButton)
         addSubview(playPauseButton)
         addSubview(nextButton)
@@ -191,7 +251,7 @@ final class NowPlayingMenuView: NSView {
             pulseView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             pulseView.centerYAnchor.constraint(equalTo: artworkView.centerYAnchor),
             pulseView.widthAnchor.constraint(equalToConstant: 18),
-            pulseView.heightAnchor.constraint(equalToConstant: 20),
+            pulseView.heightAnchor.constraint(equalToConstant: 12),
 
             titleLabel.leadingAnchor.constraint(equalTo: artworkView.trailingAnchor, constant: 8),
             titleLabel.trailingAnchor.constraint(equalTo: pulseView.leadingAnchor, constant: -8),
@@ -220,6 +280,11 @@ final class NowPlayingMenuView: NSView {
             playPauseButton.bottomAnchor.constraint(equalTo: progressView.topAnchor, constant: -1),
             playPauseButton.widthAnchor.constraint(equalToConstant: 42),
             playPauseButton.heightAnchor.constraint(equalToConstant: 42),
+
+            trackListButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            trackListButton.centerYAnchor.constraint(equalTo: playPauseButton.centerYAnchor),
+            trackListButton.widthAnchor.constraint(equalToConstant: 31),
+            trackListButton.heightAnchor.constraint(equalToConstant: 36),
 
             previousButton.centerXAnchor.constraint(equalTo: centerXAnchor, constant: -54),
             previousButton.centerYAnchor.constraint(equalTo: playPauseButton.centerYAnchor),
@@ -257,18 +322,24 @@ final class NowPlayingMenuView: NSView {
         return "\(totalSeconds / 60):\(String(format: "%02d", totalSeconds % 60))"
     }
 
-    private func updateControlImages() {
+    private func updateControlImages(animatePlayPause: Bool = false) {
         let sideConfiguration = NSImage.SymbolConfiguration(pointSize: 18, weight: .bold)
         let playConfiguration = NSImage.SymbolConfiguration(pointSize: 22, weight: .bold)
+        let trackListConfiguration = NSImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
         let lyricsConfiguration = NSImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
+        trackListButton.image = NSImage(
+            systemSymbolName: "list.bullet",
+            accessibilityDescription: nil
+        )?.withSymbolConfiguration(trackListConfiguration)
         previousButton.image = NSImage(
             systemSymbolName: "backward.fill",
             accessibilityDescription: nil
         )?.withSymbolConfiguration(sideConfiguration)
-        playPauseButton.image = NSImage(
-            systemSymbolName: isPlaying ? "pause.fill" : "play.fill",
-            accessibilityDescription: nil
-        )?.withSymbolConfiguration(playConfiguration)
+        playPauseButton.setPlaybackState(
+            isPlaying: isPlaying,
+            configuration: playConfiguration,
+            animated: animatePlayPause
+        )
         nextButton.image = NSImage(
             systemSymbolName: "forward.fill",
             accessibilityDescription: nil
@@ -280,7 +351,15 @@ final class NowPlayingMenuView: NSView {
         lyricsButton.contentTintColor = isShowingLyrics
             ? AppVisualStyle.emphasisColor
             : .secondaryLabelColor
+        trackListButton.contentTintColor = isShowingTrackList
+            ? AppVisualStyle.emphasisColor
+            : .secondaryLabelColor
 
+        trackListButton.setAccessibilityLabel(
+            isShowingTrackList
+                ? hideTrackListAccessibilityTitle
+                : showTrackListAccessibilityTitle
+        )
         previousButton.setAccessibilityLabel(previousAccessibilityTitle)
         playPauseButton.setAccessibilityLabel(isPlaying ? pauseAccessibilityTitle : playAccessibilityTitle)
         nextButton.setAccessibilityLabel(nextAccessibilityTitle)
@@ -289,6 +368,7 @@ final class NowPlayingMenuView: NSView {
         )
     }
 
+    @objc private func trackListPressed() { onTrackListToggle?() }
     @objc private func previousPressed() { onPrevious?() }
     @objc private func playPausePressed() { onPlayPause?() }
     @objc private func nextPressed() { onNext?() }
@@ -311,10 +391,23 @@ final class PlaybackProgressView: NSControl {
     private var trackingAreaReference: NSTrackingArea?
     private var isHovered = false
     private var isScrubbing = false
+    private var isInteractionEmphasized = false
+    private var interactionEmphasis: CGFloat = 0
+    private var interactionAnimationTask: Task<Void, Never>?
 
     var isUserInteracting: Bool { isScrubbing }
+    var renderedTrackThickness: CGFloat { 4 + 4 * interactionEmphasis }
 
     override var acceptsFirstResponder: Bool { isEnabled }
+
+    override var isEnabled: Bool {
+        didSet {
+            guard !isEnabled else { return }
+            isHovered = false
+            isScrubbing = false
+            setInteractionEmphasized(false, animated: false)
+        }
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -340,6 +433,7 @@ final class PlaybackProgressView: NSControl {
     override func mouseDown(with event: NSEvent) {
         guard isEnabled else { return }
         isScrubbing = true
+        setInteractionEmphasized(true, animated: true)
         updateProgress(with: event, commit: false)
     }
 
@@ -352,7 +446,7 @@ final class PlaybackProgressView: NSControl {
         guard isScrubbing else { return }
         updateProgress(with: event, commit: true)
         isScrubbing = false
-        needsDisplay = true
+        setInteractionEmphasized(isHovered, animated: true)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -386,44 +480,71 @@ final class PlaybackProgressView: NSControl {
         guard isEnabled else { return }
         NSCursor.pointingHand.set()
         isHovered = true
-        needsDisplay = true
+        setInteractionEmphasized(true, animated: true)
     }
 
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
         NSCursor.arrow.set()
         isHovered = false
-        needsDisplay = true
+        setInteractionEmphasized(isScrubbing, animated: true)
     }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        let trackRect = NSRect(x: 0, y: (bounds.height - 4) / 2, width: bounds.width, height: 4)
-        NSColor.tertiaryLabelColor.withAlphaComponent(0.28).setFill()
-        NSBezierPath(roundedRect: trackRect, xRadius: 2, yRadius: 2).fill()
+        let thickness = min(bounds.height, renderedTrackThickness)
+        let radius = thickness / 2
+        let trackRect = NSRect(
+            x: 0,
+            y: (bounds.height - thickness) / 2,
+            width: bounds.width,
+            height: thickness
+        )
+        let backgroundAlpha = 0.28 + 0.08 * interactionEmphasis
+        NSColor.tertiaryLabelColor.withAlphaComponent(backgroundAlpha).setFill()
+        NSBezierPath(roundedRect: trackRect, xRadius: radius, yRadius: radius).fill()
 
         let fillWidth = trackRect.width * progress
         if fillWidth > 0 {
-            NSColor.secondaryLabelColor.withAlphaComponent(0.8).setFill()
+            let fillAlpha = 0.8 + 0.15 * interactionEmphasis
+            NSColor.secondaryLabelColor.withAlphaComponent(fillAlpha).setFill()
             NSBezierPath(
-                roundedRect: NSRect(x: trackRect.minX, y: trackRect.minY, width: fillWidth, height: 4),
-                xRadius: 2,
-                yRadius: 2
+                roundedRect: NSRect(
+                    x: trackRect.minX,
+                    y: trackRect.minY,
+                    width: fillWidth,
+                    height: thickness
+                ),
+                xRadius: radius,
+                yRadius: radius
             ).fill()
         }
+    }
 
-        if isEnabled, isHovered || isScrubbing {
-            let knobSize: CGFloat = 7
-            let knobX = min(max(trackRect.minX, trackRect.minX + fillWidth), trackRect.maxX)
-            NSColor.labelColor.withAlphaComponent(0.92).setFill()
-            NSBezierPath(
-                ovalIn: NSRect(
-                    x: knobX - knobSize / 2,
-                    y: trackRect.midY - knobSize / 2,
-                    width: knobSize,
-                    height: knobSize
-                )
-            ).fill()
+    func setInteractionEmphasized(_ emphasized: Bool, animated: Bool) {
+        isInteractionEmphasized = emphasized
+        interactionAnimationTask?.cancel()
+        let target: CGFloat = emphasized ? 1 : 0
+        guard animated, abs(target - interactionEmphasis) > 0.001 else {
+            interactionEmphasis = target
+            needsDisplay = true
+            return
+        }
+
+        let start = interactionEmphasis
+        interactionAnimationTask = Task { [weak self] in
+            guard let self else { return }
+            let frameCount = 8
+            for frame in 1...frameCount {
+                try? await Task.sleep(for: .milliseconds(16))
+                guard !Task.isCancelled else { return }
+                let progress = CGFloat(frame) / CGFloat(frameCount)
+                let eased = 1 - pow(1 - progress, 3)
+                self.interactionEmphasis = start + (target - start) * eased
+                self.needsDisplay = true
+            }
+            self.interactionEmphasis = target
+            self.needsDisplay = true
         }
     }
 
@@ -434,15 +555,103 @@ final class PlaybackProgressView: NSControl {
     }
 }
 
+enum ArtworkAccentColor {
+    static func extract(from image: NSImage) -> NSColor? {
+        guard image.size.width > 0, image.size.height > 0 else { return nil }
+        var proposedRect = NSRect(origin: .zero, size: image.size)
+        guard let cgImage = image.cgImage(
+            forProposedRect: &proposedRect,
+            context: nil,
+            hints: nil
+        ) else { return nil }
+
+        let sampleSide = 12
+        let bytesPerPixel = 4
+        let bytesPerRow = sampleSide * bytesPerPixel
+        var pixels = [UInt8](
+            repeating: 0,
+            count: sampleSide * sampleSide * bytesPerPixel
+        )
+        let rendered = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(
+                data: buffer.baseAddress,
+                width: sampleSide,
+                height: sampleSide,
+                bitsPerComponent: 8,
+                bytesPerRow: bytesPerRow,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                    | CGBitmapInfo.byteOrder32Big.rawValue
+            ) else { return false }
+            context.interpolationQuality = .medium
+            context.draw(
+                cgImage,
+                in: CGRect(x: 0, y: 0, width: sampleSide, height: sampleSide)
+            )
+            return true
+        }
+        guard rendered else { return nil }
+
+        var redTotal: CGFloat = 0
+        var greenTotal: CGFloat = 0
+        var blueTotal: CGFloat = 0
+        var totalWeight: CGFloat = 0
+        for offset in stride(from: 0, to: pixels.count, by: bytesPerPixel) {
+            let alpha = CGFloat(pixels[offset + 3]) / 255
+            guard alpha > 0.1 else { continue }
+            let red = min(1, CGFloat(pixels[offset]) / 255 / alpha)
+            let green = min(1, CGFloat(pixels[offset + 1]) / 255 / alpha)
+            let blue = min(1, CGFloat(pixels[offset + 2]) / 255 / alpha)
+            let maximum = max(red, green, blue)
+            let minimum = min(red, green, blue)
+            let saturation = maximum > 0 ? (maximum - minimum) / maximum : 0
+            let weight = alpha * (0.35 + 0.65 * saturation)
+            redTotal += red * weight
+            greenTotal += green * weight
+            blueTotal += blue * weight
+            totalWeight += weight
+        }
+        guard totalWeight > 0 else { return nil }
+        return NSColor(
+            srgbRed: redTotal / totalWeight,
+            green: greenTotal / totalWeight,
+            blue: blueTotal / totalWeight,
+            alpha: 1
+        )
+    }
+}
+
 @MainActor
 final class AudioPulseView: NSView {
-    var accentColor: NSColor = .secondaryLabelColor {
-        didSet { needsDisplay = true }
-    }
+    private static let barCount = 5
+    private static let barWidth: CGFloat = 2
+    private static let barSpacing: CGFloat = 2
+    private static let minimumBarHeight: CGFloat = 3
+    private static let maximumBarHeight: CGFloat = 10
 
     private var phase: CGFloat = 0
     private var isPlaying = false
     private var timer: Timer?
+    private var accentColor: NSColor?
+
+    var renderedBarColor: NSColor {
+        (accentColor ?? .secondaryLabelColor)
+            .withAlphaComponent(isPlaying ? 0.78 : 0.38)
+    }
+
+    var renderedBarHeights: [CGFloat] {
+        guard isPlaying else {
+            return Array(repeating: Self.minimumBarHeight, count: Self.barCount)
+        }
+        return (0..<Self.barCount).map { index in
+            let offset = CGFloat(index)
+            let primary = sin(phase * (0.9 + offset * 0.04) + offset * 1.17)
+            let secondary = sin(phase * 0.47 + offset * 2.03)
+            let energy = min(1, abs(primary * 0.72 + secondary * 0.28))
+            return Self.minimumBarHeight
+                + (Self.maximumBarHeight - Self.minimumBarHeight) * energy
+        }
+    }
 
     func setPlaying(_ playing: Bool) {
         guard playing != isPlaying else { return }
@@ -450,13 +659,13 @@ final class AudioPulseView: NSView {
         timer?.invalidate()
         timer = nil
         if playing {
-            let timer = Timer(timeInterval: 0.095, repeats: true) { [weak self] timer in
+            let timer = Timer(timeInterval: 0.075, repeats: true) { [weak self] timer in
                 MainActor.assumeIsolated {
                     guard let self else {
                         timer.invalidate()
                         return
                     }
-                    self.phase += 0.58
+                    self.phase += 0.32
                     self.needsDisplay = true
                 }
             }
@@ -466,109 +675,32 @@ final class AudioPulseView: NSView {
         needsDisplay = true
     }
 
+    func setAccentColor(_ color: NSColor?) {
+        accentColor = color
+        needsDisplay = true
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        let count = 4
-        let spacing: CGFloat = 2
-        let barWidth = (bounds.width - spacing * CGFloat(count - 1)) / CGFloat(count)
+        let heights = renderedBarHeights
+        let contentWidth = Self.barWidth * CGFloat(Self.barCount)
+            + Self.barSpacing * CGFloat(Self.barCount - 1)
+        let leading = (bounds.width - contentWidth) / 2
+        renderedBarColor.setFill()
 
-        for index in 0..<count {
-            let wave = sin(phase * (1 + CGFloat(index) * 0.07) + CGFloat(index) * 1.23)
-            let normalized = isPlaying ? 0.52 + 0.48 * wave : 0.18
-            let height = max(5, bounds.height * max(0.12, normalized))
+        for (index, requestedHeight) in heights.enumerated() {
+            let height = min(bounds.height, requestedHeight)
             let rect = NSRect(
-                x: CGFloat(index) * (barWidth + spacing),
+                x: leading + CGFloat(index) * (Self.barWidth + Self.barSpacing),
                 y: (bounds.height - height) / 2,
-                width: barWidth,
+                width: Self.barWidth,
                 height: height
             )
-            let path = NSBezierPath(
-                roundedRect: rect,
-                xRadius: barWidth / 2,
-                yRadius: barWidth / 2
-            )
-            accentColor.withAlphaComponent(0.38).setFill()
-            path.fill()
-            NSColor.white.withAlphaComponent(0.32).setStroke()
-            path.lineWidth = 0.65
-            path.stroke()
-
-            let highlight = NSRect(
-                x: rect.minX + barWidth * 0.22,
-                y: rect.minY + rect.height * 0.18,
-                width: max(0.7, barWidth * 0.22),
-                height: rect.height * 0.62
-            )
-            NSColor.white.withAlphaComponent(0.22).setFill()
             NSBezierPath(
-                roundedRect: highlight,
-                xRadius: highlight.width / 2,
-                yRadius: highlight.width / 2
+                roundedRect: rect,
+                xRadius: Self.barWidth / 2,
+                yRadius: Self.barWidth / 2
             ).fill()
         }
-    }
-}
-
-enum ArtworkAccentColor {
-    static func extract(from image: NSImage) -> NSColor {
-        guard let bitmap = NSBitmapImageRep(
-            bitmapDataPlanes: nil,
-            pixelsWide: 10,
-            pixelsHigh: 10,
-            bitsPerSample: 8,
-            samplesPerPixel: 4,
-            hasAlpha: true,
-            isPlanar: false,
-            colorSpaceName: .deviceRGB,
-            bytesPerRow: 0,
-            bitsPerPixel: 0
-        ) else { return .secondaryLabelColor }
-
-        NSGraphicsContext.saveGraphicsState()
-        guard let context = NSGraphicsContext(bitmapImageRep: bitmap) else {
-            NSGraphicsContext.restoreGraphicsState()
-            return .secondaryLabelColor
-        }
-        NSGraphicsContext.current = context
-        image.draw(in: NSRect(x: 0, y: 0, width: 10, height: 10))
-        context.flushGraphics()
-        NSGraphicsContext.restoreGraphicsState()
-
-        var red: CGFloat = 0
-        var green: CGFloat = 0
-        var blue: CGFloat = 0
-        var totalWeight: CGFloat = 0
-        for x in 0..<10 {
-            for y in 0..<10 {
-                guard
-                    let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
-                    color.alphaComponent > 0.15
-                else { continue }
-                let saturation = max(color.redComponent, color.greenComponent, color.blueComponent)
-                    - min(color.redComponent, color.greenComponent, color.blueComponent)
-                let weight = 0.25 + saturation * 1.75
-                red += color.redComponent * weight
-                green += color.greenComponent * weight
-                blue += color.blueComponent * weight
-                totalWeight += weight
-            }
-        }
-        guard totalWeight > 0 else { return .secondaryLabelColor }
-        let sampled = NSColor(
-            calibratedRed: red / totalWeight,
-            green: green / totalWeight,
-            blue: blue / totalWeight,
-            alpha: 1
-        )
-        var hue: CGFloat = 0
-        var saturation: CGFloat = 0
-        var brightness: CGFloat = 0
-        sampled.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: nil)
-        return NSColor(
-            calibratedHue: hue,
-            saturation: max(0.38, saturation),
-            brightness: min(0.92, max(0.48, brightness)),
-            alpha: 1
-        )
     }
 }
