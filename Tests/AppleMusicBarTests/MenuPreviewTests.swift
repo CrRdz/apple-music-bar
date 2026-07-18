@@ -7,7 +7,13 @@ final class MenuPreviewTests: XCTestCase {
         let playlists = [
             LibraryPlaylistSnapshot(id: "one", name: "一", artworkURL: nil),
             LibraryPlaylistSnapshot(id: "two", name: "二", artworkURL: nil),
-            LibraryPlaylistSnapshot(id: "three", name: "三", artworkURL: nil)
+            LibraryPlaylistSnapshot(id: "three", name: "三", artworkURL: nil),
+            LibraryPlaylistSnapshot(
+                id: "folder",
+                name: "歌单合集",
+                artworkURL: nil,
+                isFolder: true
+            )
         ]
 
         XCTAssertEqual(
@@ -19,7 +25,7 @@ final class MenuPreviewTests: XCTestCase {
         )
         XCTAssertEqual(
             PlaylistDisplayFilter.validHiddenIDs(
-                ["two", "missing"],
+                ["two", "folder", "missing"],
                 in: playlists
             ),
             ["two"]
@@ -36,6 +42,7 @@ final class MenuPreviewTests: XCTestCase {
     func testCompactControlsInvokeCallbacks() {
         let view = NowPlayingMenuView()
         var invoked: [String] = []
+        view.onTrackListToggle = { invoked.append("trackList") }
         view.onPrevious = { invoked.append("previous") }
         view.onPlayPause = { invoked.append("playPause") }
         view.onNext = { invoked.append("next") }
@@ -43,10 +50,244 @@ final class MenuPreviewTests: XCTestCase {
         view.update(title: "Song", subtitle: "Artist", isPlaying: false, controlsEnabled: true)
 
         let buttons = allSubviews(of: view).compactMap { $0 as? NSButton }
-        XCTAssertEqual(buttons.count, 4)
-        XCTAssertEqual(view.subviews.compactMap { $0 as? NSButton }.count, 4)
+        XCTAssertEqual(buttons.count, 5)
+        XCTAssertEqual(view.subviews.compactMap { $0 as? NSButton }.count, 5)
         buttons.forEach { $0.performClick(nil) }
-        XCTAssertEqual(invoked, ["previous", "playPause", "next", "lyrics"])
+        XCTAssertEqual(invoked, ["trackList", "previous", "playPause", "next", "lyrics"])
+    }
+
+    @MainActor
+    func testPlaybackButtonAnimatesOnlyWhenPlaybackStateChanges() throws {
+        let view = NowPlayingMenuView()
+        view.update(
+            title: "Song",
+            subtitle: "Artist",
+            isPlaying: false,
+            controlsEnabled: true
+        )
+        let button = try XCTUnwrap(
+            allSubviews(of: view).compactMap { $0 as? PlaybackToggleButton }.first
+        )
+        XCTAssertEqual(button.displayedSymbolName, "play.fill")
+        let initialTransitionCount = button.transitionCount
+
+        view.update(
+            title: "Song",
+            subtitle: "Artist",
+            isPlaying: true,
+            controlsEnabled: true
+        )
+
+        XCTAssertEqual(button.displayedSymbolName, "pause.fill")
+        XCTAssertEqual(button.transitionCount, initialTransitionCount + 1)
+        let pauseImage = try XCTUnwrap(button.image)
+
+        view.update(
+            title: "Song",
+            subtitle: "Artist",
+            isPlaying: true,
+            controlsEnabled: true
+        )
+
+        XCTAssertEqual(button.transitionCount, initialTransitionCount + 1)
+        XCTAssertTrue(button.image === pauseImage)
+    }
+
+    @MainActor
+    func testTrackListButtonTogglesAndReflectsExpandedState() throws {
+        let view = PlayerPopoverView()
+        var toggleCount = 0
+        view.onTrackListToggle = { toggleCount += 1 }
+        view.updatePlaybackAccessibility(
+            previous: "上一首",
+            play: "播放",
+            pause: "暂停",
+            next: "下一首",
+            showTrackList: "展开歌曲列表",
+            hideTrackList: "收起歌曲列表"
+        )
+
+        let collapsedButton = try XCTUnwrap(
+            allSubviews(of: view)
+                .compactMap { $0 as? NSButton }
+                .first { $0.accessibilityLabel() == "展开歌曲列表" }
+        )
+        collapsedButton.performClick(nil)
+        XCTAssertEqual(toggleCount, 1)
+
+        view.setTrackListMode(.vertical)
+        let expandedButton = try XCTUnwrap(
+            allSubviews(of: view)
+                .compactMap { $0 as? NSButton }
+                .first { $0.accessibilityLabel() == "收起歌曲列表" }
+        )
+        XCTAssertEqual(expandedButton.contentTintColor, AppVisualStyle.emphasisColor)
+    }
+
+    @MainActor
+    func testTrackSearchFiltersRowsAndPreservesPlaylistIndex() throws {
+        let view = PlayerPopoverView()
+        view.updateLocalization(.english)
+        var selectedIndex: Int?
+        view.onTrackSelected = { _, index in selectedIndex = index }
+        view.setTracks([
+            LibraryTrackSnapshot(
+                id: "track-1",
+                title: "夜曲",
+                album: "11月的萧邦",
+                artist: "周杰伦",
+                artworkURL: nil
+            ),
+            LibraryTrackSnapshot(
+                id: "track-2",
+                title: "晴天",
+                album: "叶惠美",
+                artist: "周杰伦",
+                artworkURL: nil
+            ),
+            LibraryTrackSnapshot(
+                id: "track-3",
+                title: "Nocturne",
+                album: "Op. 9",
+                artist: "Chopin",
+                artworkURL: nil
+            )
+        ])
+        view.setTrackListMode(.vertical)
+        view.frame = NSRect(origin: .zero, size: view.intrinsicContentSize)
+        view.layoutSubtreeIfNeeded()
+
+        let searchField = try XCTUnwrap(
+            allSubviews(of: view)
+                .compactMap { $0 as? SongSearchInputView }
+                .first { !$0.isHiddenOrHasHiddenAncestor }
+        )
+        XCTAssertTrue(searchField.textView.isEditable)
+        XCTAssertTrue(searchField.textView.isSelectable)
+        XCTAssertFalse(searchField.textView.drawsBackground)
+        XCTAssertEqual(
+            try XCTUnwrap(searchField.textView.layer?.backgroundColor?.alpha),
+            0,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(searchField.layer?.borderWidth ?? 0, 0, accuracy: 0.001)
+        XCTAssertEqual(
+            try XCTUnwrap(searchField.layer?.backgroundColor?.alpha),
+            0,
+            accuracy: 0.001
+        )
+        searchField.stringValue = "晴天 周杰伦"
+        searchField.applyCurrentText()
+        XCTAssertEqual(view.displayedTrackCount, 1)
+
+        let result = try XCTUnwrap(
+            allSubviews(of: view)
+                .compactMap { $0 as? NSButton }
+                .first {
+                    $0.accessibilityLabel()?.contains("晴天") == true
+                        && !$0.isHiddenOrHasHiddenAncestor
+                }
+        )
+        result.performClick(nil)
+        XCTAssertEqual(selectedIndex, 1)
+
+        searchField.stringValue = "missing"
+        searchField.applyCurrentText()
+        XCTAssertEqual(view.displayedTrackCount, 0)
+        XCTAssertTrue(
+            allSubviews(of: view)
+                .compactMap { $0 as? NSTextField }
+                .contains { $0.stringValue == "No matching songs" }
+        )
+
+        view.setTrackListMode(.horizontal)
+        view.frame = NSRect(origin: .zero, size: view.intrinsicContentSize)
+        view.layoutSubtreeIfNeeded()
+        let horizontalSearchField = try XCTUnwrap(
+            allSubviews(of: view)
+                .compactMap { $0 as? SongSearchInputView }
+                .first { !$0.isHiddenOrHasHiddenAncestor }
+        )
+        horizontalSearchField.stringValue = "Nocturne Chopin"
+        horizontalSearchField.applyCurrentText()
+        let horizontalResult = try XCTUnwrap(
+            allSubviews(of: view)
+                .compactMap { $0 as? NSButton }
+                .first {
+                    $0.accessibilityLabel()?.contains("Nocturne") == true
+                        && !$0.isHiddenOrHasHiddenAncestor
+                }
+        )
+        horizontalResult.performClick(nil)
+        XCTAssertEqual(selectedIndex, 2)
+    }
+
+    @MainActor
+    func testSearchWaitsForChineseInputMethodCompositionToCommit() async throws {
+        let searchField = SongSearchInputView()
+        searchField.placeholderString = "搜索歌曲、艺人或专辑"
+        XCTAssertTrue(searchField.isPlaceholderVisible)
+        searchField.frame = NSRect(x: 0, y: 0, width: 220, height: 22)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 240, height: 44),
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView?.addSubview(searchField)
+        window.contentView?.layoutSubtreeIfNeeded()
+        searchField.layoutSubtreeIfNeeded()
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        XCTAssertTrue(searchField.beginEditing())
+        let editor = searchField.textView
+        searchField.textDidBeginEditing(Notification(
+            name: NSText.didBeginEditingNotification,
+            object: editor
+        ))
+        XCTAssertFalse(searchField.isPlaceholderVisible)
+        XCTAssertTrue(window.firstResponder === editor)
+        XCTAssertNotNil(window.firstResponder)
+        XCTAssertFalse(editor.drawsBackground)
+        XCTAssertEqual(editor.backgroundColor.alphaComponent, 0, accuracy: 0.001)
+        XCTAssertEqual(editor.insertionPointColor, AppVisualStyle.emphasisColor)
+        XCTAssertNotNil(editor.inputContext)
+        XCTAssertFalse(editor.isVerticallyResizable)
+        XCTAssertEqual(searchField.layer?.masksToBounds, true)
+        let editorFrame = editor.frame
+        editor.setMarkedText(
+            "nanerhao",
+            selectedRange: NSRange(location: 8, length: 0),
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        if
+            let layoutManager = editor.layoutManager,
+            let textContainer = editor.textContainer
+        {
+            layoutManager.ensureLayout(for: textContainer)
+        }
+        XCTAssertEqual(editor.frame, editorFrame)
+        XCTAssertTrue(searchField.bounds.contains(editor.frame))
+        XCTAssertFalse(searchField.isPlaceholderVisible)
+        XCTAssertFalse(
+            SearchCompositionState.shouldApplyChange(hasMarkedText: true)
+        )
+
+        editor.unmarkText()
+        var committedValues: [String] = []
+        searchField.onCommittedTextChange = {
+            committedValues.append(searchField.stringValue)
+        }
+        searchField.stringValue = "男二号"
+        XCTAssertTrue(
+            SearchCompositionState.shouldApplyChange(hasMarkedText: false)
+        )
+        searchField.textDidChange(Notification(
+            name: NSText.didChangeNotification,
+            object: editor
+        ))
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(committedValues, ["男二号"])
     }
 
     @MainActor
@@ -65,6 +306,17 @@ final class MenuPreviewTests: XCTestCase {
         let progressView = try XCTUnwrap(
             allSubviews(of: view).compactMap { $0 as? PlaybackProgressView }.first
         )
+        let timeLabels = allSubviews(of: view)
+            .compactMap { $0 as? NSTextField }
+            .filter { ["0:20", "−3:00"].contains($0.stringValue) }
+
+        XCTAssertEqual(progressView.renderedTrackThickness, 4, accuracy: 0.001)
+        XCTAssertEqual(timeLabels.count, 2)
+        XCTAssertTrue(timeLabels.allSatisfy { !$0.isHidden })
+
+        progressView.setInteractionEmphasized(true, animated: false)
+        XCTAssertEqual(progressView.renderedTrackThickness, 8, accuracy: 0.001)
+        XCTAssertTrue(timeLabels.allSatisfy { !$0.isHidden })
 
         progressView.scrub(to: 0.625, commit: true)
 
@@ -75,6 +327,10 @@ final class MenuPreviewTests: XCTestCase {
                 .compactMap { $0 as? NSTextField }
                 .contains { $0.stringValue == "2:05" }
         )
+
+        progressView.setInteractionEmphasized(false, animated: false)
+        XCTAssertEqual(progressView.renderedTrackThickness, 4, accuracy: 0.001)
+        XCTAssertTrue(timeLabels.allSatisfy { !$0.isHidden })
     }
 
     @MainActor
@@ -119,6 +375,11 @@ final class MenuPreviewTests: XCTestCase {
         let title = try XCTUnwrap(centerCard.subviews.first { $0 is NSTextField })
         XCTAssertTrue(centerCard.isFlipped)
         XCTAssertLessThan(artwork.frame.maxY, title.frame.minY)
+        XCTAssertFalse(
+            allSubviews(of: view)
+                .compactMap { $0 as? NSTextField }
+                .contains { $0.stringValue.contains("双指左右滑动") }
+        )
     }
 
     @MainActor
@@ -184,7 +445,7 @@ final class MenuPreviewTests: XCTestCase {
 
         view.setTrackListMode(.horizontal)
         XCTAssertEqual(view.trackListMode, .horizontal)
-        XCTAssertEqual(view.intrinsicContentSize, NSSize(width: 252, height: 378))
+        XCTAssertEqual(view.intrinsicContentSize, NSSize(width: 252, height: 406))
 
         view.setTrackListMode(.off)
         XCTAssertEqual(view.intrinsicContentSize, NSSize(width: 252, height: 252))
@@ -202,7 +463,7 @@ final class MenuPreviewTests: XCTestCase {
             source: .lrclibSynced
         )
         view.setTrackListMode(.horizontal)
-        XCTAssertEqual(view.intrinsicContentSize, NSSize(width: 252, height: 378))
+        XCTAssertEqual(view.intrinsicContentSize, NSSize(width: 252, height: 406))
 
         view.setLyricsTimeline(timeline)
         view.updateLyricsPosition(7)
@@ -216,7 +477,7 @@ final class MenuPreviewTests: XCTestCase {
         view.setLyricsVisible(false)
         XCTAssertFalse(view.isLyricsVisible)
         XCTAssertEqual(view.trackListMode, .horizontal)
-        XCTAssertEqual(view.intrinsicContentSize, NSSize(width: 252, height: 378))
+        XCTAssertEqual(view.intrinsicContentSize, NSSize(width: 252, height: 406))
     }
 
     @MainActor
@@ -251,7 +512,7 @@ final class MenuPreviewTests: XCTestCase {
 
         view.setLyricsVisible(false)
 
-        XCTAssertEqual(view.frame.size, NSSize(width: 252, height: 378))
+        XCTAssertEqual(view.frame.size, NSSize(width: 252, height: 406))
         XCTAssertFalse(view.isLyricsVisible)
     }
 
@@ -376,10 +637,22 @@ final class MenuPreviewTests: XCTestCase {
 
         XCTAssertEqual(centerCard.accessibilityHelp(), "播放")
         XCTAssertLessThan(centerCard.subviews.filter(\.isHidden).count, hiddenSubviewsBeforeHover)
+        let playOverlay = try XCTUnwrap(
+            centerCard.subviews.first {
+                $0.accessibilityIdentifier() == "track-play-overlay"
+            }
+        )
+        XCTAssertEqual(playOverlay.layer?.backgroundColor?.alpha ?? 0, 0, accuracy: 0.001)
+        XCTAssertEqual(playOverlay.layer?.borderWidth ?? 0, 0, accuracy: 0.001)
+        XCTAssertNil(playOverlay.hitTest(NSPoint(x: 1, y: 1)))
+        centerCard.updateTrackingAreas()
+        XCTAssertTrue(
+            centerCard.trackingAreas.contains { $0.options.contains(.activeAlways) }
+        )
         centerCard.performClick(nil)
         XCTAssertEqual(playedTrackID, tracks[0].id)
 
-        view.setCurrentTrack(TrackSnapshot(
+        let playingTrack = TrackSnapshot(
             title: tracks[0].title,
             artist: tracks[0].artist,
             album: tracks[0].album,
@@ -387,13 +660,20 @@ final class MenuPreviewTests: XCTestCase {
             position: 1,
             state: .playing,
             embeddedLyrics: ""
-        ))
+        )
+        view.setCurrentTrack(playingTrack)
         XCTAssertEqual(centerCard.accessibilityHelp(), "暂停")
         XCTAssertEqual(
             try XCTUnwrap(centerCard.layer?.backgroundColor?.alpha),
             0,
             accuracy: 0.001
         )
+        let playOverlayImage = try XCTUnwrap(
+            playOverlay.subviews.compactMap { $0 as? NSImageView }.first
+        )
+        let pauseImage = try XCTUnwrap(playOverlayImage.image)
+        view.setCurrentTrack(playingTrack)
+        XCTAssertTrue(playOverlayImage.image === pauseImage)
         centerCard.performClick(nil)
         XCTAssertEqual(playPauseCount, 1)
     }
@@ -413,12 +693,33 @@ final class MenuPreviewTests: XCTestCase {
     }
 
     @MainActor
-    func testArtworkAccentColorReflectsCoverColor() throws {
-        let image = makePreviewArtwork(
-            color: NSColor(calibratedRed: 0.08, green: 0.24, blue: 0.86, alpha: 1)
+    func testAudioPulseUsesFiveCompactAnimatedBars() {
+        let pulse = AudioPulseView(frame: NSRect(x: 0, y: 0, width: 18, height: 12))
+        XCTAssertEqual(pulse.renderedBarHeights, [3, 3, 3, 3, 3])
+
+        pulse.setPlaying(true)
+
+        let heights = pulse.renderedBarHeights
+        XCTAssertEqual(heights.count, 5)
+        XCTAssertGreaterThan(heights.max() ?? 0, 3)
+        XCTAssertLessThanOrEqual(heights.max() ?? 0, 10)
+        XCTAssertGreaterThanOrEqual(heights.min() ?? 0, 3)
+
+        pulse.setPlaying(false)
+    }
+
+    @MainActor
+    func testAudioPulseColorComesFromCurrentArtwork() throws {
+        let view = NowPlayingMenuView()
+        view.setArtwork(makePreviewArtwork(
+            color: NSColor(srgbRed: 0.06, green: 0.18, blue: 0.92, alpha: 1)
+        ))
+
+        let pulse = try XCTUnwrap(
+            allSubviews(of: view).compactMap { $0 as? AudioPulseView }.first
         )
         let color = try XCTUnwrap(
-            ArtworkAccentColor.extract(from: image).usingColorSpace(.deviceRGB)
+            pulse.renderedBarColor.usingColorSpace(.deviceRGB)
         )
         XCTAssertGreaterThan(color.blueComponent, color.redComponent)
         XCTAssertGreaterThan(color.blueComponent, color.greenComponent)
@@ -530,7 +831,19 @@ final class MenuPreviewTests: XCTestCase {
         let event = try XCTUnwrap(NSEvent(cgEvent: cgEvent))
         hoverRow.mouseEntered(with: event)
         XCTAssertLessThan(hoverRow.subviews.filter(\.isHidden).count, hiddenBefore)
-        XCTAssertNotNil(hoverRow.layer?.backgroundColor)
+        XCTAssertEqual(hoverRow.layer?.backgroundColor?.alpha ?? 0, 0, accuracy: 0.001)
+        let playOverlay = try XCTUnwrap(
+            hoverRow.subviews.first {
+                $0.accessibilityIdentifier() == "track-play-overlay"
+            }
+        )
+        XCTAssertEqual(playOverlay.layer?.backgroundColor?.alpha ?? 0, 0, accuracy: 0.001)
+        XCTAssertEqual(playOverlay.layer?.borderWidth ?? 0, 0, accuracy: 0.001)
+        XCTAssertNil(playOverlay.hitTest(NSPoint(x: 1, y: 1)))
+        hoverRow.updateTrackingAreas()
+        XCTAssertTrue(
+            hoverRow.trackingAreas.contains { $0.options.contains(.activeAlways) }
+        )
     }
 
     @MainActor
@@ -586,6 +899,62 @@ final class MenuPreviewTests: XCTestCase {
     }
 
     @MainActor
+    func testTrackListToggleKeepsNativeMenuOpen() throws {
+        _ = NSApplication.shared
+        guard let screenFrame = NSScreen.main?.visibleFrame else {
+            throw XCTSkip("需要可用的 WindowServer 才能验证原生菜单窗口")
+        }
+        let view = PlayerPopoverView()
+        view.updatePlaybackAccessibility(
+            previous: "上一首",
+            play: "播放",
+            pause: "暂停",
+            next: "下一首",
+            showTrackList: "展开歌曲列表",
+            hideTrackList: "收起歌曲列表"
+        )
+        let playerMenu = NativePlayerMenu(
+            contentView: view,
+            contentSize: view.intrinsicContentSize
+        )
+        view.onPreferredSizeChange = { size in
+            playerMenu.updateContentSize(size)
+        }
+        view.onTrackListToggle = {
+            view.setTrackListMode(view.trackListMode == .off ? .vertical : .off)
+        }
+
+        var stayedOpenAfterExpand = false
+        var stayedOpenAfterCollapse = false
+        let failSafe = DispatchWorkItem { playerMenu.cancel() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: failSafe)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            let expandButton = self.allSubviews(of: view)
+                .compactMap { $0 as? NSButton }
+                .first { $0.accessibilityLabel() == "展开歌曲列表" }
+            expandButton?.performClick(nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                stayedOpenAfterExpand = playerMenu.isOpen
+                let collapseButton = self.allSubviews(of: view)
+                    .compactMap { $0 as? NSButton }
+                    .first { $0.accessibilityLabel() == "收起歌曲列表" }
+                collapseButton?.performClick(nil)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                    stayedOpenAfterCollapse = playerMenu.isOpen
+                    playerMenu.cancel()
+                }
+            }
+        }
+
+        playerMenu.present(at: NSPoint(x: screenFrame.midX, y: screenFrame.maxY - 40))
+        failSafe.cancel()
+
+        XCTAssertTrue(stayedOpenAfterExpand)
+        XCTAssertTrue(stayedOpenAfterCollapse)
+        XCTAssertEqual(view.trackListMode, .off)
+    }
+
+    @MainActor
     func testNativeMenuKeepsItsTopAnchoredDuringLiveContentChanges() throws {
         _ = NSApplication.shared
         guard let screenFrame = NSScreen.main?.visibleFrame else {
@@ -604,6 +973,7 @@ final class MenuPreviewTests: XCTestCase {
         var initialFrame: NSRect?
         var lyricsFrame: NSRect?
         var restoredFrame: NSRect?
+        var rapidToggleFrame: NSRect?
         let failSafe = DispatchWorkItem { playerMenu.cancel() }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: failSafe)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
@@ -614,7 +984,17 @@ final class MenuPreviewTests: XCTestCase {
                 view.setLyricsVisible(false)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
                     restoredFrame = playerMenu.windowFrame
-                    playerMenu.cancel()
+                    view.setLyricsVisible(true)
+                    view.setLyricsVisible(false)
+                    view.setTrackListMode(.off)
+                    view.setTrackListMode(.vertical)
+                    view.setLyricsVisible(true)
+                    view.setLyricsVisible(false)
+                    view.setTrackListMode(.horizontal)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                        rapidToggleFrame = playerMenu.windowFrame
+                        playerMenu.cancel()
+                    }
                 }
             }
         }
@@ -625,10 +1005,14 @@ final class MenuPreviewTests: XCTestCase {
         let initial = try XCTUnwrap(initialFrame)
         let lyrics = try XCTUnwrap(lyricsFrame)
         let restored = try XCTUnwrap(restoredFrame)
+        let rapidToggle = try XCTUnwrap(rapidToggleFrame)
         XCTAssertEqual(lyrics.maxY, initial.maxY, accuracy: 1)
         XCTAssertEqual(restored.maxY, initial.maxY, accuracy: 1)
-        XCTAssertEqual(lyrics.height - initial.height, 160, accuracy: 1)
+        XCTAssertEqual(rapidToggle.maxY, initial.maxY, accuracy: 1)
+        XCTAssertEqual(rapidToggle.minX, initial.minX, accuracy: 1)
+        XCTAssertEqual(lyrics.height - initial.height, 132, accuracy: 1)
         XCTAssertEqual(restored.height, initial.height, accuracy: 1)
+        XCTAssertEqual(rapidToggle.size, initial.size)
     }
 
     @MainActor
@@ -652,6 +1036,10 @@ final class MenuPreviewTests: XCTestCase {
             duration: 292
         )
         view.setArtwork(makePreviewArtwork())
+        allSubviews(of: view)
+            .compactMap { $0 as? PlaybackProgressView }
+            .first?
+            .setInteractionEmphasized(true, animated: false)
         view.frame = NSRect(origin: .zero, size: view.intrinsicContentSize)
         view.layoutSubtreeIfNeeded()
 
