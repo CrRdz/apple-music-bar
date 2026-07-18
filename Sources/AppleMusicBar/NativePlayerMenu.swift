@@ -2,6 +2,12 @@ import AppKit
 
 @MainActor
 final class NativePlayerMenu: NSObject, NSMenuDelegate {
+    private struct WindowResizeAnchor {
+        let top: CGFloat
+        let leading: CGFloat
+        let chromeSize: NSSize
+    }
+
     let menu = NSMenu()
     let settingsItem = NSMenuItem()
     let item = NSMenuItem()
@@ -9,6 +15,10 @@ final class NativePlayerMenu: NSObject, NSMenuDelegate {
     private(set) var isOpen = false
     private let contentView: NSView
     private var contentSize: NSSize
+    private var windowResizeAnchor: WindowResizeAnchor?
+    private var resizeRevision = 0
+    private var pendingContentSize: NSSize?
+    private var isContentSizeUpdateScheduled = false
 
     var onWillOpen: (() -> Void)?
     var onDidClose: (() -> Void)?
@@ -60,9 +70,40 @@ final class NativePlayerMenu: NSObject, NSMenuDelegate {
     }
 
     func updateContentSize(_ size: NSSize) {
+        if isOpen {
+            guard pendingContentSize != size else { return }
+            guard pendingContentSize != nil || contentSize != size else { return }
+            pendingContentSize = size
+            guard !isContentSizeUpdateScheduled else { return }
+            isContentSizeUpdateScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.isContentSizeUpdateScheduled = false
+                guard let pendingContentSize = self.pendingContentSize else { return }
+                self.pendingContentSize = nil
+                self.applyContentSize(pendingContentSize)
+            }
+            return
+        }
+
+        pendingContentSize = nil
+        applyContentSize(size)
+    }
+
+    private func applyContentSize(_ size: NSSize) {
         guard size != contentSize else { return }
         let previousSize = contentSize
         let previousWindowFrame = contentView.window?.frame
+        if isOpen, windowResizeAnchor == nil, let previousWindowFrame {
+            windowResizeAnchor = WindowResizeAnchor(
+                top: previousWindowFrame.maxY,
+                leading: previousWindowFrame.minX,
+                chromeSize: NSSize(
+                    width: max(0, previousWindowFrame.width - previousSize.width),
+                    height: max(0, previousWindowFrame.height - previousSize.height)
+                )
+            )
+        }
         contentSize = size
         menu.minimumWidth = size.width
         contentView.frame.size = size
@@ -70,24 +111,19 @@ final class NativePlayerMenu: NSObject, NSMenuDelegate {
         menu.itemChanged(item)
         menu.update()
 
-        guard
-            isOpen,
-            let window = contentView.window,
-            let previousWindowFrame
-        else { return }
+        guard isOpen, let anchor = windowResizeAnchor else { return }
+        resizeRevision += 1
+        let revision = resizeRevision
+        reanchorWindow(contentSize: size, anchor: anchor)
 
-        let expectedSize = NSSize(
-            width: previousWindowFrame.width + size.width - previousSize.width,
-            height: previousWindowFrame.height + size.height - previousSize.height
-        )
-        if abs(window.frame.width - expectedSize.width) > 0.5
-            || abs(window.frame.height - expectedSize.height) > 0.5
-            || abs(window.frame.maxY - previousWindowFrame.maxY) > 0.5 {
-            var frame = window.frame
-            let anchoredTop = previousWindowFrame.maxY
-            frame.size = expectedSize
-            frame.origin.y = anchoredTop - expectedSize.height
-            window.setFrame(frame, display: true)
+        DispatchQueue.main.async { [weak self] in
+            guard
+                let self,
+                self.isOpen,
+                self.resizeRevision == revision,
+                let anchor = self.windowResizeAnchor
+            else { return }
+            self.reanchorWindow(contentSize: self.contentSize, anchor: anchor)
         }
     }
 
@@ -95,11 +131,46 @@ final class NativePlayerMenu: NSObject, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         isOpen = true
+        windowResizeAnchor = nil
+        resizeRevision += 1
         onWillOpen?()
     }
 
     func menuDidClose(_ menu: NSMenu) {
         isOpen = false
+        windowResizeAnchor = nil
+        resizeRevision += 1
         onDidClose?()
+    }
+
+    private func reanchorWindow(contentSize: NSSize, anchor: WindowResizeAnchor) {
+        guard let window = contentView.window else { return }
+        let expectedSize = NSSize(
+            width: contentSize.width + anchor.chromeSize.width,
+            height: contentSize.height + anchor.chromeSize.height
+        )
+        var frame = NSRect(
+            x: anchor.leading,
+            y: anchor.top - expectedSize.height,
+            width: expectedSize.width,
+            height: expectedSize.height
+        )
+
+        if let visibleFrame = window.screen?.visibleFrame {
+            if frame.maxX > visibleFrame.maxX {
+                frame.origin.x = visibleFrame.maxX - frame.width
+            }
+            frame.origin.x = max(visibleFrame.minX, frame.origin.x)
+            frame.origin.y = max(visibleFrame.minY, frame.origin.y)
+        }
+
+        let currentFrame = window.frame
+        guard
+            abs(currentFrame.minX - frame.minX) > 0.5
+                || abs(currentFrame.minY - frame.minY) > 0.5
+                || abs(currentFrame.width - frame.width) > 0.5
+                || abs(currentFrame.height - frame.height) > 0.5
+        else { return }
+        window.setFrame(frame, display: true)
     }
 }
