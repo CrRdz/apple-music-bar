@@ -808,7 +808,8 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             keyEquivalent: ""
         )
         let playlistVisibilityMenu = NSMenu()
-        if allPlaylists.isEmpty {
+        let configurablePlaylists = allPlaylists.filter { !$0.isFolder }
+        if configurablePlaylists.isEmpty {
             let emptyKey: AppStringKey
             if case .loading = libraryState {
                 emptyKey = .loadingLibrary
@@ -823,7 +824,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             emptyItem.isEnabled = false
             playlistVisibilityMenu.addItem(emptyItem)
         } else {
-            for playlist in allPlaylists {
+            for playlist in configurablePlaylists {
                 let item = NSMenuItem(
                     title: language.displayText(playlist.name),
                     action: #selector(togglePlaylistVisibility(_:)),

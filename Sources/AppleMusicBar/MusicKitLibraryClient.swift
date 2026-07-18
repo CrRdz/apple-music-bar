@@ -5,6 +5,14 @@ struct LibraryPlaylistSnapshot: Identifiable, Equatable, Sendable {
     let id: String
     let name: String
     let artworkURL: URL?
+    let isFolder: Bool
+
+    init(id: String, name: String, artworkURL: URL?, isFolder: Bool = false) {
+        self.id = id
+        self.name = name
+        self.artworkURL = artworkURL
+        self.isFolder = isFolder
+    }
 }
 
 struct LibraryTrackSnapshot: Identifiable, Equatable, Sendable {
@@ -25,14 +33,14 @@ enum PlaylistDisplayFilter {
         from playlists: [LibraryPlaylistSnapshot],
         hiddenIDs: Set<String>
     ) -> [LibraryPlaylistSnapshot] {
-        playlists.filter { !hiddenIDs.contains($0.id) }
+        playlists.filter { !$0.isFolder && !hiddenIDs.contains($0.id) }
     }
 
     static func validHiddenIDs(
         _ hiddenIDs: Set<String>,
         in playlists: [LibraryPlaylistSnapshot]
     ) -> Set<String> {
-        hiddenIDs.intersection(playlists.map(\.id))
+        hiddenIDs.intersection(playlists.filter { !$0.isFolder }.map(\.id))
     }
 }
 
@@ -102,7 +110,8 @@ actor MusicKitLibraryClient {
                     LibraryPlaylistSnapshot(
                         id: $0.id.rawValue,
                         name: $0.name,
-                        artworkURL: $0.artwork?.url(width: 180, height: 180)
+                        artworkURL: $0.artwork?.url(width: 180, height: 180),
+                        isFolder: $0.playParameters == nil && $0.url == nil
                     )
                 }
                 .sorted {
