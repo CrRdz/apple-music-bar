@@ -94,11 +94,13 @@ enum AppLanguage: String, CaseIterable, Sendable {
         .artist: "艺人",
         .loadingTracks: "正在读取歌曲…",
         .emptyTracks: "这个播放列表中没有歌曲",
-        .swipePlaylists: "双指左右滑动切换播放列表",
+        .searchSongs: "搜索歌曲、艺人或专辑",
+        .noSearchResults: "未找到匹配的歌曲",
         .playlistSettings: "更多选项",
         .playPlaylist: "播放这个列表",
         .playlistVisibility: "显示播放列表",
         .showTrackList: "显示歌曲列表",
+        .hideTrackList: "收起歌曲列表",
         .trackListOff: "关闭",
         .trackListVertical: "垂直列表",
         .trackListHorizontal: "横向封面",
@@ -140,11 +142,13 @@ enum AppLanguage: String, CaseIterable, Sendable {
         .artist: "藝人",
         .loadingTracks: "正在讀取歌曲…",
         .emptyTracks: "這個播放列表中沒有歌曲",
-        .swipePlaylists: "雙指左右滑動切換播放列表",
+        .searchSongs: "搜尋歌曲、藝人或專輯",
+        .noSearchResults: "找不到相符的歌曲",
         .playlistSettings: "更多選項",
         .playPlaylist: "播放這個列表",
         .playlistVisibility: "顯示播放列表",
         .showTrackList: "顯示歌曲列表",
+        .hideTrackList: "收起歌曲列表",
         .trackListOff: "關閉",
         .trackListVertical: "垂直列表",
         .trackListHorizontal: "橫向封面",
@@ -186,11 +190,13 @@ enum AppLanguage: String, CaseIterable, Sendable {
         .artist: "Artist",
         .loadingTracks: "Loading songs…",
         .emptyTracks: "This playlist has no songs",
-        .swipePlaylists: "Swipe horizontally with two fingers",
+        .searchSongs: "Search songs, artists, or albums",
+        .noSearchResults: "No matching songs",
         .playlistSettings: "More Options",
         .playPlaylist: "Play This Playlist",
         .playlistVisibility: "Visible Playlists",
         .showTrackList: "Show Song List",
+        .hideTrackList: "Hide Song List",
         .trackListOff: "Off",
         .trackListVertical: "Vertical List",
         .trackListHorizontal: "Horizontal Covers",
@@ -233,11 +239,13 @@ enum AppStringKey: Hashable {
     case artist
     case loadingTracks
     case emptyTracks
-    case swipePlaylists
+    case searchSongs
+    case noSearchResults
     case playlistSettings
     case playPlaylist
     case playlistVisibility
     case showTrackList
+    case hideTrackList
     case trackListOff
     case trackListVertical
     case trackListHorizontal

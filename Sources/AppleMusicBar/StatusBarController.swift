@@ -50,6 +50,10 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         UserDefaults.standard.stringArray(forKey: "hiddenPlaylistIDs") ?? []
     )
     private var trackListMode = TrackListDisplayMode.load()
+    private var lastVisibleTrackListMode: TrackListDisplayMode = {
+        let savedMode = TrackListDisplayMode.load()
+        return savedMode == .off ? .vertical : savedMode
+    }()
     private var hasUserSelectedPlaylist = false
     private var currentPlaylistName: String?
     private var libraryGeneration = 0
@@ -67,7 +71,6 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private var playlistArtworkTask: Task<Void, Never>?
     private var trackArtworkTask: Task<Void, Never>?
     private var shouldRestorePlaybackFocusAfterPlaylistLoad = false
-
     private var rawDisplayText = ""
     private var marqueeCharacters: [Character] = []
     private var marqueeIndex = 0
@@ -117,10 +120,12 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         )
         playerMenu.onWillOpen = { [weak self] in
             guard let self else { return }
+            NSApp.activate()
             self.restorePlaybackContext()
             self.playerMenu.updateContentSize(self.playerView.intrinsicContentSize)
         }
         statusItem.menu = playerMenu.menu
+        playerView.onTrackListToggle = { [weak self] in self?.toggleTrackList() }
         playerView.onPrevious = { [weak self] in self?.send(.previousTrack) }
         playerView.onPlayPause = { [weak self] in self?.send(.playPause) }
         playerView.onNext = { [weak self] in self?.send(.nextTrack) }
@@ -284,7 +289,9 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             pause: language.localized(.pause),
             next: language.localized(.next),
             showLyrics: language.localized(.showLyrics),
-            hideLyrics: language.localized(.hideLyrics)
+            hideLyrics: language.localized(.hideLyrics),
+            showTrackList: language.localized(.showTrackList),
+            hideTrackList: language.localized(.hideTrackList)
         )
         statusItem.button?.setAccessibilityLabel(language.localized(.accessibilityLyrics))
         renderLibraryState()
@@ -906,6 +913,20 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         }
     }
 
+    private func toggleTrackList() {
+        let nextMode = trackListMode == .off ? lastVisibleTrackListMode : .off
+        applyTrackListMode(nextMode)
+    }
+
+    private func applyTrackListMode(_ mode: TrackListDisplayMode) {
+        trackListMode = mode
+        if mode != .off {
+            lastVisibleTrackListMode = mode
+        }
+        mode.save()
+        playerView.setTrackListMode(mode)
+    }
+
     @objc private func refreshLyrics() {
         guard let currentTrack else { return }
         currentTimeline = nil
@@ -934,9 +955,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             let rawValue = sender.representedObject as? String,
             let mode = TrackListDisplayMode(rawValue: rawValue)
         else { return }
-        trackListMode = mode
-        mode.save()
-        playerView.setTrackListMode(mode)
+        applyTrackListMode(mode)
     }
 
     @objc private func selectLanguage(_ sender: NSMenuItem) {

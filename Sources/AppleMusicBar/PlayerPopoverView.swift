@@ -35,6 +35,7 @@ enum TrackListDisplayMode: String, CaseIterable {
 
 @MainActor
 final class PlayerPopoverView: NSView {
+    var onTrackListToggle: (() -> Void)?
     var onPrevious: (() -> Void)?
     var onPlayPause: (() -> Void)?
     var onNext: (() -> Void)?
@@ -49,7 +50,7 @@ final class PlayerPopoverView: NSView {
     private static let carouselHeight: CGFloat = 126
     private static let nowPlayingHeight: CGFloat = 126
     private static let verticalTrackListHeight: CGFloat = 286
-    private static let horizontalTrackListHeight: CGFloat = 126
+    private static let horizontalTrackListHeight: CGFloat = 154
     private static let lyricsHeight: CGFloat = 286
 
     private let stackView = NSStackView()
@@ -142,7 +143,9 @@ final class PlayerPopoverView: NSView {
         pause: String,
         next: String,
         showLyrics: String = "Show Lyrics",
-        hideLyrics: String = "Hide Lyrics"
+        hideLyrics: String = "Hide Lyrics",
+        showTrackList: String = "Show Song List",
+        hideTrackList: String = "Hide Song List"
     ) {
         nowPlayingView.updateAccessibility(
             previous: previous,
@@ -150,7 +153,9 @@ final class PlayerPopoverView: NSView {
             pause: pause,
             next: next,
             showLyrics: showLyrics,
-            hideLyrics: hideLyrics
+            hideLyrics: hideLyrics,
+            showTrackList: showTrackList,
+            hideTrackList: hideTrackList
         )
     }
 
@@ -371,6 +376,17 @@ final class PlayerPopoverView: NSView {
     }
 
     private func connectActions() {
+        nowPlayingView.onTrackListToggle = { [weak self] in
+            guard let self else { return }
+            if self.isLyricsVisible {
+                if self.trackListMode == .off {
+                    self.onTrackListToggle?()
+                }
+                self.setLyricsVisible(false)
+                return
+            }
+            self.onTrackListToggle?()
+        }
         nowPlayingView.onPrevious = { [weak self] in self?.onPrevious?() }
         nowPlayingView.onPlayPause = { [weak self] in self?.onPlayPause?() }
         nowPlayingView.onNext = { [weak self] in self?.onNext?() }
@@ -418,6 +434,7 @@ final class PlayerPopoverView: NSView {
         lyricsView.isHidden = !isLyricsVisible
         trackListView.isHidden = isLyricsVisible || trackListMode != .vertical
         horizontalTrackListView.isHidden = isLyricsVisible || trackListMode != .horizontal
+        nowPlayingView.setTrackListVisible(!isLyricsVisible && trackListMode != .off)
     }
 
     private func applyContentModeChange() {
@@ -461,6 +478,227 @@ final class PlayerPopoverView: NSView {
 }
 
 @MainActor
+final class ActivatingSearchTextView: NSTextView {
+    var onPrepareForTextInput: (() -> Void)?
+    var onSubmit: (() -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        onPrepareForTextInput?()
+        super.mouseDown(with: event)
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        onPrepareForTextInput?()
+        return super.becomeFirstResponder()
+    }
+
+    override func insertNewline(_ sender: Any?) {
+        onSubmit?()
+    }
+}
+
+@MainActor
+final class SongSearchInputView: NSView, NSTextViewDelegate {
+    var onCommittedTextChange: (() -> Void)?
+
+    let textView = ActivatingSearchTextView()
+    private let searchIconView = NSImageView()
+    private let placeholderLabel = NSTextField(labelWithString: "")
+    private var textChangeRevision = 0
+    private var preferredInputSource: NSTextInputSourceIdentifier?
+    private var isEditing = false
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        configureAppearanceAndInput()
+    }
+
+    convenience init() {
+        self.init(frame: .zero)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    var stringValue: String {
+        get { textView.string }
+        set {
+            textView.string = newValue
+            updatePlaceholderVisibility()
+        }
+    }
+
+    var placeholderString: String? {
+        get { placeholderLabel.stringValue }
+        set { placeholderLabel.stringValue = newValue ?? "" }
+    }
+
+    var isInputEnabled: Bool {
+        get { textView.isEditable }
+        set {
+            textView.isEditable = newValue
+            textView.isSelectable = newValue
+            searchIconView.alphaValue = newValue ? 1 : 0.45
+            placeholderLabel.alphaValue = newValue ? 1 : 0.45
+        }
+    }
+
+    var isPlaceholderVisible: Bool { !placeholderLabel.isHidden }
+
+    override func layout() {
+        super.layout()
+        searchIconView.frame = NSRect(
+            x: 2,
+            y: max(0, (bounds.height - 14) / 2),
+            width: 14,
+            height: 14
+        )
+        let textFrame = NSRect(
+            x: 21,
+            y: max(0, (bounds.height - 19) / 2),
+            width: max(0, bounds.width - 21),
+            height: 19
+        )
+        placeholderLabel.frame = textFrame
+        textView.frame = textFrame
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        beginEditing()
+    }
+
+    func textDidBeginEditing(_ notification: Notification) {
+        isEditing = true
+        updatePlaceholderVisibility()
+        prepareWindowForTextInput()
+        configureTextView()
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            NSApp.activate()
+            self.window?.makeKey()
+            self.configureTextView()
+        }
+    }
+
+    func textDidEndEditing(_ notification: Notification) {
+        isEditing = false
+        preferredInputSource = nil
+        updatePlaceholderVisibility()
+    }
+
+    func textDidChange(_ notification: Notification) {
+        updatePlaceholderVisibility()
+        textChangeRevision += 1
+        let revision = textChangeRevision
+        DispatchQueue.main.async { [weak self] in
+            guard
+                let self,
+                self.textChangeRevision == revision,
+                SearchCompositionState.shouldApplyChange(in: self.textView)
+            else { return }
+            self.onCommittedTextChange?()
+        }
+    }
+
+    func applyCurrentText() {
+        textChangeRevision += 1
+        guard SearchCompositionState.shouldApplyChange(in: textView) else { return }
+        onCommittedTextChange?()
+    }
+
+    @discardableResult
+    func beginEditing() -> Bool {
+        prepareWindowForTextInput()
+        let accepted = window?.makeFirstResponder(textView) ?? false
+        configureTextView()
+        return accepted
+    }
+
+    private func configureAppearanceAndInput() {
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+        layer?.masksToBounds = true
+
+        searchIconView.image = NSImage(
+            systemSymbolName: "magnifyingglass",
+            accessibilityDescription: nil
+        )?.withSymbolConfiguration(
+            NSImage.SymbolConfiguration(pointSize: 11, weight: .regular)
+        )
+        searchIconView.contentTintColor = .secondaryLabelColor
+        searchIconView.imageScaling = .scaleProportionallyDown
+        addSubview(searchIconView)
+
+        placeholderLabel.font = .systemFont(ofSize: 11, weight: .regular)
+        placeholderLabel.textColor = .secondaryLabelColor
+        placeholderLabel.lineBreakMode = .byTruncatingTail
+        addSubview(placeholderLabel)
+
+        textView.font = .systemFont(ofSize: 11, weight: .regular)
+        textView.textColor = .labelColor
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.isRichText = false
+        textView.importsGraphics = false
+        textView.drawsBackground = false
+        textView.backgroundColor = .clear
+        textView.insertionPointColor = AppVisualStyle.emphasisColor
+        textView.isVerticallyResizable = false
+        textView.isHorizontallyResizable = false
+        textView.minSize = NSSize(width: 0, height: 19)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: 19)
+        textView.textContainerInset = NSSize(width: 0, height: 1)
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.heightTracksTextView = true
+        textView.textContainer?.maximumNumberOfLines = 1
+        textView.textContainer?.lineBreakMode = .byTruncatingTail
+        textView.delegate = self
+        textView.onPrepareForTextInput = { [weak self] in
+            self?.prepareWindowForTextInput()
+        }
+        textView.onSubmit = { [weak self] in self?.applyCurrentText() }
+        addSubview(textView)
+        configureTextView()
+        updatePlaceholderVisibility()
+    }
+
+    private func prepareWindowForTextInput() {
+        if preferredInputSource == nil {
+            preferredInputSource = NSTextInputContext.current?.selectedKeyboardInputSource
+        }
+        NSApp.activate()
+        window?.makeKey()
+    }
+
+    private func configureTextView() {
+        textView.drawsBackground = false
+        textView.backgroundColor = .clear
+        textView.wantsLayer = true
+        textView.layer?.backgroundColor = NSColor.clear.cgColor
+        textView.insertionPointColor = AppVisualStyle.emphasisColor
+        textView.allowedInputSourceLocales = nil
+        if
+            let preferredInputSource,
+            let inputContext = textView.inputContext,
+            inputContext.keyboardInputSources?.contains(preferredInputSource) != false
+        {
+            inputContext.selectedKeyboardInputSource = preferredInputSource
+        }
+        textView.inputContext?.invalidateCharacterCoordinates()
+        textView.updateInsertionPointStateAndRestartTimer(true)
+    }
+
+    private func updatePlaceholderVisibility() {
+        placeholderLabel.isHidden = isEditing
+            || textView.hasMarkedText()
+            || !textView.string.isEmpty
+    }
+}
+
+@MainActor
 private final class TrackCarouselView: NSView {
     var onTrackSelected: ((LibraryTrackSnapshot, Int) -> Void)?
     var onPlayPause: (() -> Void)?
@@ -470,9 +708,13 @@ private final class TrackCarouselView: NSView {
     private let centerCard = TrackCarouselCard()
     private let rightCard = TrackCarouselCard()
     private let farRightCard = TrackCarouselCard()
+    private let searchField = SongSearchInputView()
     private let placeholderLabel = NSTextField(labelWithString: "")
 
+    private var allTracks: [LibraryTrackSnapshot] = []
     private var tracks: [LibraryTrackSnapshot] = []
+    private var originalTrackIndexes: [Int] = []
+    private var sourcePlaceholder = ""
     private var language = AppLanguage.load()
     private var artworkByID: [String: NSImage] = [:]
     private var currentTrackID: String?
@@ -498,7 +740,7 @@ private final class TrackCarouselView: NSView {
     }
 
     init() {
-        super.init(frame: NSRect(x: 0, y: 0, width: 240, height: 126))
+        super.init(frame: NSRect(x: 0, y: 0, width: 240, height: 154))
         wantsLayer = true
         layer?.masksToBounds = true
         cardSlots.forEach {
@@ -506,6 +748,10 @@ private final class TrackCarouselView: NSView {
             $0.card.target = self
             $0.card.action = #selector(cardPressed(_:))
         }
+        searchField.onCommittedTextChange = { [weak self] in
+            self?.searchChanged()
+        }
+        addSubview(searchField)
         placeholderLabel.font = .systemFont(ofSize: 11.5, weight: .medium)
         placeholderLabel.textColor = .secondaryLabelColor
         placeholderLabel.alignment = .center
@@ -526,13 +772,29 @@ private final class TrackCarouselView: NSView {
         let previouslySelectedID = selectedIndex.flatMap { index in
             self.tracks.indices.contains(index) ? self.tracks[index].id : nil
         }
-        self.tracks = tracks
+        let playlistChanged = tracks.map(\.id) != allTracks.map(\.id)
+        allTracks = tracks
+        sourcePlaceholder = placeholder
         self.language = language
+        if playlistChanged {
+            searchField.stringValue = ""
+        }
+        searchField.placeholderString = language.localized(.searchSongs)
+        searchField.isInputEnabled = !tracks.isEmpty
         let visibleIDs = Set(tracks.map(\.id))
         artworkByID = artworkByID.filter { visibleIDs.contains($0.key) }
+        applySearch(preferredTrackID: previouslySelectedID)
+    }
+
+    private func applySearch(preferredTrackID: String?) {
+        let indexedTracks = allTracks.enumerated().filter { _, track in
+            TrackSearchFilter.matches(track, query: searchField.stringValue, language: language)
+        }
+        tracks = indexedTracks.map(\.element)
+        originalTrackIndexes = indexedTracks.map(\.offset)
         selectedIndex = currentTrackID.flatMap { id in
             tracks.firstIndex { $0.id == id }
-        } ?? previouslySelectedID.flatMap { id in
+        } ?? preferredTrackID.flatMap { id in
             tracks.firstIndex { $0.id == id }
         } ?? (tracks.isEmpty ? nil : 0)
         continuousOffset = 0
@@ -540,7 +802,13 @@ private final class TrackCarouselView: NSView {
         animationTask?.cancel()
         isInteracting = false
         isAnimating = false
-        placeholderLabel.stringValue = placeholder
+        if allTracks.isEmpty {
+            placeholderLabel.stringValue = sourcePlaceholder
+        } else if tracks.isEmpty {
+            placeholderLabel.stringValue = language.localized(.noSearchResults)
+        } else {
+            placeholderLabel.stringValue = ""
+        }
         placeholderLabel.isHidden = !tracks.isEmpty
         renderCards()
     }
@@ -555,10 +823,7 @@ private final class TrackCarouselView: NSView {
     }
 
     func setCurrentTrackID(_ trackID: String?) {
-        guard currentTrackID != trackID else {
-            renderCards()
-            return
-        }
+        guard currentTrackID != trackID else { return }
         currentTrackID = trackID
         if
             let trackID,
@@ -592,12 +857,13 @@ private final class TrackCarouselView: NSView {
 
     override func layout() {
         super.layout()
+        searchField.frame = NSRect(x: 6, y: bounds.height - 29, width: bounds.width - 12, height: 22)
         if !isInteracting, !isAnimating {
             layoutCards(at: continuousOffset)
         }
         placeholderLabel.frame = NSRect(
             x: 12,
-            y: max(0, (bounds.height - 42) / 2),
+            y: 42,
             width: max(0, bounds.width - 24),
             height: 42
         )
@@ -787,7 +1053,7 @@ private final class TrackCarouselView: NSView {
             if tracks[sender.tag].id == currentTrackID {
                 onPlayPause?()
             } else {
-                onTrackSelected?(tracks[sender.tag], sender.tag)
+                onTrackSelected?(tracks[sender.tag], originalTrackIndexes[sender.tag])
             }
         } else {
             let forward = (sender.tag - selectedIndex + tracks.count) % tracks.count
@@ -795,6 +1061,19 @@ private final class TrackCarouselView: NSView {
             animateNavigate(by: abs(backward) < abs(forward) ? backward : forward)
         }
     }
+
+    private func searchChanged() {
+        guard SearchCompositionState.shouldApplyChange(in: searchField.textView) else { return }
+        let selectedID = selectedIndex.flatMap { index in
+            tracks.indices.contains(index) ? tracks[index].id : nil
+        }
+        applySearch(preferredTrackID: selectedID)
+    }
+}
+
+@MainActor
+private final class NonInteractivePlayOverlayView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 @MainActor
@@ -802,13 +1081,14 @@ private final class TrackCarouselCard: NSButton {
     private let artworkView = NSImageView()
     private let titleLabel = NSTextField(labelWithString: "")
     private let artistLabel = NSTextField(labelWithString: "")
-    private let playOverlay = NSView()
+    private let playOverlay = NonInteractivePlayOverlayView()
     private let playOverlayImage = NSImageView()
     private var hoverTrackingArea: NSTrackingArea?
     private var prominence: CGFloat = 0
     private var isCurrent = false
     private var isPlaying = false
     private var isHovered = false
+    private var displayedSymbolName: String?
 
     override var isFlipped: Bool { true }
 
@@ -836,12 +1116,19 @@ private final class TrackCarouselCard: NSButton {
         addSubview(artistLabel)
 
         playOverlay.wantsLayer = true
-        playOverlay.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.46).cgColor
+        playOverlay.layer?.backgroundColor = NSColor.clear.cgColor
+        playOverlay.layer?.borderWidth = 0
         playOverlay.layer?.cornerCurve = .continuous
         playOverlay.isHidden = true
+        playOverlay.setAccessibilityIdentifier("track-play-overlay")
         addSubview(playOverlay)
         playOverlayImage.imageScaling = .scaleProportionallyDown
         playOverlayImage.contentTintColor = .white
+        playOverlayImage.wantsLayer = true
+        playOverlayImage.layer?.shadowColor = NSColor.black.cgColor
+        playOverlayImage.layer?.shadowOpacity = 0.6
+        playOverlayImage.layer?.shadowRadius = 1.4
+        playOverlayImage.layer?.shadowOffset = .zero
         playOverlay.addSubview(playOverlayImage)
     }
 
@@ -919,7 +1206,7 @@ private final class TrackCarouselCard: NSButton {
         if let hoverTrackingArea { removeTrackingArea(hoverTrackingArea) }
         let area = NSTrackingArea(
             rect: bounds,
-            options: [.activeInKeyWindow, .mouseEnteredAndExited, .inVisibleRect],
+            options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect],
             owner: self,
             userInfo: nil
         )
@@ -947,10 +1234,13 @@ private final class TrackCarouselCard: NSButton {
         let isCentered = prominence > 0.82
         playOverlay.isHidden = !isCentered || (!isHovered && !isCurrent)
         let symbolName = isCurrent && isPlaying ? "pause.fill" : "play.fill"
-        playOverlayImage.image = NSImage(
-            systemSymbolName: symbolName,
-            accessibilityDescription: nil
-        )?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 10, weight: .bold))
+        if displayedSymbolName != symbolName {
+            displayedSymbolName = symbolName
+            playOverlayImage.image = NSImage(
+                systemSymbolName: symbolName,
+                accessibilityDescription: nil
+            )?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 10, weight: .bold))
+        }
     }
 }
 
@@ -964,7 +1254,6 @@ final class PlaylistCarouselView: NSView {
     private let centerCard = PlaylistCoverCard()
     private let rightCard = PlaylistCoverCard()
     private let farRightCard = PlaylistCoverCard()
-    private let swipeHintLabel = NSTextField(labelWithString: "")
 
     private var playlists: [LibraryPlaylistSnapshot] = []
     private var language = AppLanguage.load()
@@ -1011,11 +1300,6 @@ final class PlaylistCarouselView: NSView {
             $0.card.target = self
             $0.card.action = #selector(cardPressed(_:))
         }
-        swipeHintLabel.font = .systemFont(ofSize: 9.5, weight: .regular)
-        swipeHintLabel.textColor = .tertiaryLabelColor
-        swipeHintLabel.alignment = .center
-        addSubview(swipeHintLabel)
-
     }
 
     @available(*, unavailable)
@@ -1038,7 +1322,6 @@ final class PlaylistCarouselView: NSView {
         animationTask?.cancel()
         isInteracting = false
         isAnimating = false
-        swipeHintLabel.stringValue = language.localized(.swipePlaylists)
         renderCards()
     }
 
@@ -1091,7 +1374,6 @@ final class PlaylistCarouselView: NSView {
         if !isInteracting, !isAnimating {
             layoutCards(at: continuousOffset)
         }
-        swipeHintLabel.frame = NSRect(x: 8, y: 1, width: 224, height: 14)
     }
 
     override func scrollWheel(with event: NSEvent) {
@@ -1239,7 +1521,7 @@ final class PlaylistCarouselView: NSView {
             let width = 66 + 22 * prominence
             let height = 88 + 18 * prominence
             let x = centerX + position * slotSpacing - width / 2
-            let y = 28 - 10 * prominence
+            let y = 19 - 9 * prominence
             let outerFade = max(0, distance - 1)
             let opacity = max(0, 0.68 + 0.32 * prominence - 0.66 * outerFade)
 
@@ -1392,12 +1674,52 @@ private final class PlaylistCoverCard: NSButton {
     }
 }
 
+enum TrackSearchFilter {
+    static func matches(
+        _ track: LibraryTrackSnapshot,
+        query: String,
+        language: AppLanguage
+    ) -> Bool {
+        let tokens = normalized(query).split(whereSeparator: \Character.isWhitespace)
+        guard !tokens.isEmpty else { return true }
+
+        let values = [track.title, track.artist, track.album]
+        let searchableValues = values.flatMap { value in
+            [value, language.displayText(value)]
+        }.map(normalized)
+        return tokens.allSatisfy { token in
+            searchableValues.contains { $0.contains(token) }
+        }
+    }
+
+    private static func normalized(_ value: String) -> String {
+        value.folding(
+            options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+            locale: .current
+        ).lowercased()
+    }
+}
+
+enum SearchCompositionState {
+    static func shouldApplyChange(in textView: NSTextView) -> Bool {
+        shouldApplyChange(hasMarkedText: textView.hasMarkedText())
+    }
+
+    static func shouldApplyChange(hasMarkedText: Bool) -> Bool {
+        !hasMarkedText
+    }
+}
+
 @MainActor
 private final class PlaylistTrackListView: NSView {
+    private let searchField = SongSearchInputView()
     private let songHeading = NSTextField(labelWithString: "")
     private let artistHeading = NSTextField(labelWithString: "")
     private let scrollView = NSScrollView()
     private let contentView = TrackListContentView()
+    private var tracks: [LibraryTrackSnapshot] = []
+    private var placeholder = ""
+    private var language = AppLanguage.load()
 
     var onTrackSelected: ((LibraryTrackSnapshot, Int) -> Void)? {
         didSet { contentView.onTrackSelected = onTrackSelected }
@@ -1407,6 +1729,11 @@ private final class PlaylistTrackListView: NSView {
 
     init() {
         super.init(frame: NSRect(x: 0, y: 0, width: 240, height: 286))
+        searchField.onCommittedTextChange = { [weak self] in
+            self?.searchChanged()
+        }
+        addSubview(searchField)
+
         [songHeading, artistHeading].forEach {
             $0.font = .systemFont(ofSize: 10.5, weight: .semibold)
             $0.textColor = .secondaryLabelColor
@@ -1432,9 +1759,18 @@ private final class PlaylistTrackListView: NSView {
         placeholder: String,
         language: AppLanguage
     ) {
+        let playlistChanged = tracks.map(\.id) != self.tracks.map(\.id)
+        self.tracks = tracks
+        self.placeholder = placeholder
+        self.language = language
+        if playlistChanged {
+            searchField.stringValue = ""
+        }
+        searchField.placeholderString = language.localized(.searchSongs)
+        searchField.isInputEnabled = !tracks.isEmpty
         songHeading.stringValue = language.localized(.songs)
         artistHeading.stringValue = language.localized(.artist)
-        contentView.update(tracks: tracks, placeholder: placeholder, language: language)
+        renderFilteredTracks()
         needsLayout = true
     }
 
@@ -1459,10 +1795,40 @@ private final class PlaylistTrackListView: NSView {
 
     override func layout() {
         super.layout()
-        songHeading.frame = NSRect(x: 7, y: bounds.height - 24, width: 150, height: 18)
-        artistHeading.frame = NSRect(x: bounds.width - 72, y: bounds.height - 24, width: 64, height: 18)
-        scrollView.frame = NSRect(x: 0, y: 0, width: bounds.width, height: bounds.height - 27)
+        searchField.frame = NSRect(x: 6, y: bounds.height - 29, width: bounds.width - 12, height: 22)
+        songHeading.frame = NSRect(x: 7, y: bounds.height - 52, width: 150, height: 18)
+        artistHeading.frame = NSRect(x: bounds.width - 72, y: bounds.height - 52, width: 64, height: 18)
+        scrollView.frame = NSRect(x: 0, y: 0, width: bounds.width, height: bounds.height - 55)
         contentView.resize(to: scrollView.contentSize)
+    }
+
+    private func renderFilteredTracks() {
+        let indexedTracks = tracks.enumerated().compactMap { index, track in
+            TrackSearchFilter.matches(track, query: searchField.stringValue, language: language)
+                ? (index: index, track: track)
+                : nil
+        }
+        let filteredPlaceholder: String
+        if tracks.isEmpty {
+            filteredPlaceholder = placeholder
+        } else if indexedTracks.isEmpty {
+            filteredPlaceholder = language.localized(.noSearchResults)
+        } else {
+            filteredPlaceholder = ""
+        }
+        contentView.update(
+            indexedTracks: indexedTracks,
+            retainingArtworkForIDs: Set(tracks.map(\.id)),
+            placeholder: filteredPlaceholder,
+            language: language
+        )
+        needsLayout = true
+        layoutSubtreeIfNeeded()
+    }
+
+    private func searchChanged() {
+        guard SearchCompositionState.shouldApplyChange(in: searchField.textView) else { return }
+        renderFilteredTracks()
     }
 }
 
@@ -1498,16 +1864,16 @@ private final class TrackListContentView: NSView {
     }
 
     func update(
-        tracks: [LibraryTrackSnapshot],
+        indexedTracks: [(index: Int, track: LibraryTrackSnapshot)],
+        retainingArtworkForIDs trackIDs: Set<String>,
         placeholder: String,
         language: AppLanguage
     ) {
-        if !tracks.isEmpty {
-            let visibleIDs = Set(tracks.map(\.id))
-            artworkByID = artworkByID.filter { visibleIDs.contains($0.key) }
+        if !trackIDs.isEmpty {
+            artworkByID = artworkByID.filter { trackIDs.contains($0.key) }
         }
         rows.forEach { $0.removeFromSuperview() }
-        rows = tracks.enumerated().map { index, track in
+        rows = indexedTracks.map { index, track in
             let row = TrackRowView()
             row.update(track: track, language: language)
             row.setArtwork(artworkByID[track.id])
@@ -1518,9 +1884,11 @@ private final class TrackListContentView: NSView {
             addSubview(row)
             return row
         }
-        rowsByID = Dictionary(uniqueKeysWithValues: zip(tracks.map(\.id), rows))
+        rowsByID = Dictionary(
+            uniqueKeysWithValues: zip(indexedTracks.map(\.track.id), rows)
+        )
         placeholderLabel.stringValue = placeholder
-        placeholderLabel.isHidden = !tracks.isEmpty
+        placeholderLabel.isHidden = !indexedTracks.isEmpty
         needsLayout = true
     }
 
@@ -1572,11 +1940,12 @@ private final class TrackRowView: NSButton {
     private let albumLabel = NSTextField(labelWithString: "")
     private let artistLabel = NSTextField(labelWithString: "")
     private let separator = NSBox()
-    private let playOverlay = NSView()
+    private let playOverlay = NonInteractivePlayOverlayView()
     private let playOverlayImage = NSImageView()
     private var hoverTrackingArea: NSTrackingArea?
     private var isHovered = false
     private var isCurrent = false
+    private var displayedSymbolName: String?
 
     var onPlay: (() -> Void)?
 
@@ -1603,12 +1972,19 @@ private final class TrackRowView: NSButton {
         playOverlay.wantsLayer = true
         playOverlay.layer?.cornerRadius = AppVisualStyle.goldenCornerRadius(for: 24)
         playOverlay.layer?.cornerCurve = .continuous
-        playOverlay.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.48).cgColor
+        playOverlay.layer?.backgroundColor = NSColor.clear.cgColor
+        playOverlay.layer?.borderWidth = 0
         playOverlay.isHidden = true
+        playOverlay.setAccessibilityIdentifier("track-play-overlay")
         addSubview(playOverlay)
 
         playOverlayImage.imageScaling = .scaleProportionallyDown
         playOverlayImage.contentTintColor = .white
+        playOverlayImage.wantsLayer = true
+        playOverlayImage.layer?.shadowColor = NSColor.black.cgColor
+        playOverlayImage.layer?.shadowOpacity = 0.6
+        playOverlayImage.layer?.shadowRadius = 1.4
+        playOverlayImage.layer?.shadowOffset = .zero
         playOverlay.addSubview(playOverlayImage)
 
         titleLabel.font = .systemFont(ofSize: 11.5, weight: .semibold)
@@ -1691,7 +2067,7 @@ private final class TrackRowView: NSButton {
         }
         let area = NSTrackingArea(
             rect: bounds,
-            options: [.activeInKeyWindow, .mouseEnteredAndExited, .inVisibleRect],
+            options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect],
             owner: self,
             userInfo: nil
         )
@@ -1714,20 +2090,22 @@ private final class TrackRowView: NSButton {
     }
 
     private func updateInteractionAppearance() {
-        if isHovered || isCurrent {
-            let alpha: CGFloat = isCurrent ? 0.14 : 0.09
+        if isCurrent {
             layer?.backgroundColor = NSColor.secondaryLabelColor
-                .withAlphaComponent(alpha)
+                .withAlphaComponent(0.14)
                 .cgColor
         } else {
             layer?.backgroundColor = NSColor.clear.cgColor
         }
         playOverlay.isHidden = !isHovered && !isCurrent
         let symbolName = isCurrent && !isHovered ? "speaker.wave.2.fill" : "play.fill"
-        playOverlayImage.image = NSImage(
-            systemSymbolName: symbolName,
-            accessibilityDescription: nil
-        )?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 10, weight: .bold))
+        if displayedSymbolName != symbolName {
+            displayedSymbolName = symbolName
+            playOverlayImage.image = NSImage(
+                systemSymbolName: symbolName,
+                accessibilityDescription: nil
+            )?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 10, weight: .bold))
+        }
         titleLabel.textColor = .labelColor
     }
 
@@ -1893,11 +2271,12 @@ private final class HorizontalTrackCard: NSButton {
     private let artworkView = NSImageView()
     private let titleLabel = NSTextField(labelWithString: "")
     private let artistLabel = NSTextField(labelWithString: "")
-    private let playOverlay = NSView()
+    private let playOverlay = NonInteractivePlayOverlayView()
     private let playOverlayImage = NSImageView()
     private var hoverTrackingArea: NSTrackingArea?
     private var isHovered = false
     private var isCurrent = false
+    private var displayedSymbolName: String?
 
     var onPlay: (() -> Void)?
 
@@ -1926,12 +2305,19 @@ private final class HorizontalTrackCard: NSButton {
         playOverlay.wantsLayer = true
         playOverlay.layer?.cornerRadius = AppVisualStyle.goldenCornerRadius(for: 28)
         playOverlay.layer?.cornerCurve = .continuous
-        playOverlay.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.48).cgColor
+        playOverlay.layer?.backgroundColor = NSColor.clear.cgColor
+        playOverlay.layer?.borderWidth = 0
         playOverlay.isHidden = true
+        playOverlay.setAccessibilityIdentifier("track-play-overlay")
         addSubview(playOverlay)
 
         playOverlayImage.imageScaling = .scaleProportionallyDown
         playOverlayImage.contentTintColor = .white
+        playOverlayImage.wantsLayer = true
+        playOverlayImage.layer?.shadowColor = NSColor.black.cgColor
+        playOverlayImage.layer?.shadowOpacity = 0.6
+        playOverlayImage.layer?.shadowRadius = 1.4
+        playOverlayImage.layer?.shadowOffset = .zero
         playOverlay.addSubview(playOverlayImage)
 
         titleLabel.font = .systemFont(ofSize: 10.5, weight: .semibold)
@@ -2005,7 +2391,7 @@ private final class HorizontalTrackCard: NSButton {
         if let hoverTrackingArea { removeTrackingArea(hoverTrackingArea) }
         let area = NSTrackingArea(
             rect: bounds,
-            options: [.activeInKeyWindow, .mouseEnteredAndExited, .inVisibleRect],
+            options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect],
             owner: self,
             userInfo: nil
         )
@@ -2031,10 +2417,13 @@ private final class HorizontalTrackCard: NSButton {
         layer?.backgroundColor = NSColor.clear.cgColor
         playOverlay.isHidden = !isHovered && !isCurrent
         let symbolName = isCurrent && !isHovered ? "speaker.wave.2.fill" : "play.fill"
-        playOverlayImage.image = NSImage(
-            systemSymbolName: symbolName,
-            accessibilityDescription: nil
-        )?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 11, weight: .bold))
+        if displayedSymbolName != symbolName {
+            displayedSymbolName = symbolName
+            playOverlayImage.image = NSImage(
+                systemSymbolName: symbolName,
+                accessibilityDescription: nil
+            )?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 11, weight: .bold))
+        }
         titleLabel.textColor = .labelColor
     }
 
