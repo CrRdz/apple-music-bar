@@ -65,6 +65,8 @@ final class NowPlayingMenuView: NSView {
     private let lyricsButton = NSButton()
 
     private var isPlaying = false
+    private var controlsEnabled = false
+    private var isActive = false
     private var isShowingTrackList = false
     private var isShowingLyrics = false
     private var currentDuration: TimeInterval = 0
@@ -103,22 +105,51 @@ final class NowPlayingMenuView: NSView {
         position: TimeInterval = 0,
         duration: TimeInterval = 0
     ) {
-        titleLabel.stringValue = title
-        subtitleLabel.stringValue = subtitle
-        subtitleLabel.isHidden = subtitle.isEmpty
+        if titleLabel.stringValue != title {
+            titleLabel.stringValue = title
+        }
+        if subtitleLabel.stringValue != subtitle {
+            subtitleLabel.stringValue = subtitle
+        }
+        if subtitleLabel.isHidden != subtitle.isEmpty {
+            subtitleLabel.isHidden = subtitle.isEmpty
+        }
         let playbackStateChanged = self.isPlaying != isPlaying
+        let controlsStateChanged = self.controlsEnabled != controlsEnabled
         self.isPlaying = isPlaying
-        previousButton.isEnabled = controlsEnabled
-        playPauseButton.isEnabled = controlsEnabled
-        nextButton.isEnabled = controlsEnabled
-        progressView.isEnabled = controlsEnabled && duration > 0
+        self.controlsEnabled = controlsEnabled
+        if previousButton.isEnabled != controlsEnabled {
+            previousButton.isEnabled = controlsEnabled
+            playPauseButton.isEnabled = controlsEnabled
+            nextButton.isEnabled = controlsEnabled
+        }
+        let progressEnabled = controlsEnabled && duration > 0
+        if progressView.isEnabled != progressEnabled {
+            progressView.isEnabled = progressEnabled
+        }
         currentDuration = max(0, duration)
         pulseView.setPlaying(isPlaying && controlsEnabled)
-        updateControlImages(
-            animatePlayPause: playbackStateChanged && controlsEnabled
-        )
+        if playbackStateChanged || controlsStateChanged {
+            updateControlImages(
+                animatePlayPause: playbackStateChanged && controlsEnabled
+            )
+        }
         updateProgress(position: position, duration: duration)
-        setAccessibilityLabel(subtitle.isEmpty ? title : "\(title), \(subtitle)")
+        let accessibilityLabel = subtitle.isEmpty ? title : "\(title), \(subtitle)"
+        if self.accessibilityLabel() != accessibilityLabel {
+            setAccessibilityLabel(accessibilityLabel)
+        }
+    }
+
+    func updatePlaybackPosition(_ position: TimeInterval, duration: TimeInterval) {
+        currentDuration = max(0, duration)
+        updateProgress(position: position, duration: duration)
+    }
+
+    func setActive(_ active: Bool) {
+        guard isActive != active else { return }
+        isActive = active
+        pulseView.setActive(active)
     }
 
     func updateAccessibility(
@@ -311,9 +342,18 @@ final class NowPlayingMenuView: NSView {
         if respectingUserInteraction, progressView.isUserInteracting { return }
         let safeDuration = max(0, duration)
         let safePosition = min(max(0, position), safeDuration > 0 ? safeDuration : max(0, position))
-        progressView.progress = safeDuration > 0 ? safePosition / safeDuration : 0
-        elapsedLabel.stringValue = Self.formattedTime(safePosition)
-        remainingLabel.stringValue = "−\(Self.formattedTime(max(0, safeDuration - safePosition)))"
+        let progress = safeDuration > 0 ? safePosition / safeDuration : 0
+        if progressView.progress != progress {
+            progressView.progress = progress
+        }
+        let elapsed = Self.formattedTime(safePosition)
+        if elapsedLabel.stringValue != elapsed {
+            elapsedLabel.stringValue = elapsed
+        }
+        let remaining = "−\(Self.formattedTime(max(0, safeDuration - safePosition)))"
+        if remainingLabel.stringValue != remaining {
+            remainingLabel.stringValue = remaining
+        }
     }
 
     private static func formattedTime(_ interval: TimeInterval) -> String {
@@ -631,8 +671,11 @@ final class AudioPulseView: NSView {
 
     private var phase: CGFloat = 0
     private var isPlaying = false
+    private var isActive = false
     private var timer: Timer?
     private var accentColor: NSColor?
+
+    var isAnimating: Bool { timer != nil }
 
     var renderedBarColor: NSColor {
         (accentColor ?? .secondaryLabelColor)
@@ -656,9 +699,21 @@ final class AudioPulseView: NSView {
     func setPlaying(_ playing: Bool) {
         guard playing != isPlaying else { return }
         isPlaying = playing
+        updateTimer()
+        needsDisplay = true
+    }
+
+    func setActive(_ active: Bool) {
+        guard active != isActive else { return }
+        isActive = active
+        updateTimer()
+        needsDisplay = true
+    }
+
+    private func updateTimer() {
         timer?.invalidate()
         timer = nil
-        if playing {
+        if isPlaying && isActive {
             let timer = Timer(timeInterval: 0.075, repeats: true) { [weak self] timer in
                 MainActor.assumeIsolated {
                     guard let self else {
@@ -672,7 +727,6 @@ final class AudioPulseView: NSView {
             RunLoop.main.add(timer, forMode: .common)
             self.timer = timer
         }
-        needsDisplay = true
     }
 
     func setAccentColor(_ color: NSColor?) {

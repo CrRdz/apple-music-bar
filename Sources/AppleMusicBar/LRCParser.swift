@@ -6,8 +6,10 @@ struct LyricLine: Equatable, Sendable {
 }
 
 enum LyricsSource: String, Sendable {
+    case appleMusicSynced = "Apple Music 同步歌词"
     case embeddedSynced = "曲目内嵌同步歌词"
     case lrclibSynced = "LRCLIB 同步歌词"
+    case appleMusicEstimated = "Apple Music 歌词（估算进度）"
     case embeddedEstimated = "曲目内嵌歌词（估算进度）"
     case lrclibEstimated = "LRCLIB 歌词（估算进度）"
 }

@@ -43,6 +43,7 @@ final class PlayerPopoverView: NSView {
     var onPlaylistFocused: ((Int) -> Void)?
     var onPlaylistActivated: ((Int) -> Void)?
     var onTrackSelected: ((LibraryTrackSnapshot, Int) -> Void)?
+    var onVisibleTrackIDsChange: (([String]) -> Void)?
     var onReloadLibrary: (() -> Void)?
     var onPreferredSizeChange: ((NSSize) -> Void)?
 
@@ -72,9 +73,19 @@ final class PlayerPopoverView: NSView {
     private var trackStatusKey: AppStringKey?
     private var currentTrack: TrackSnapshot?
     private var currentLyricsTimeline: LyricsTimeline?
+    private var currentLyricsPosition: TimeInterval = 0
+    private var lyricsNeedsRender = true
     private var lyricsPlaceholderKey: AppStringKey = .lyricsUnavailable
     private(set) var trackListMode: TrackListDisplayMode = .off
     private(set) var isLyricsVisible = false
+    private var isSurfaceActive = false
+    private var lastVisibleTrackIDs: [String] = []
+    private let trackArtworkCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 96
+        cache.totalCostLimit = 32 * 1_024 * 1_024
+        return cache
+    }()
 
     private var preferredSize: NSSize {
         let baseHeight = Self.carouselHeight + Self.nowPlayingHeight
@@ -95,7 +106,14 @@ final class PlayerPopoverView: NSView {
 
     var visiblePlaylistIDs: [String] { carouselView.visiblePlaylistIDs }
     var focusedPlaylistIndex: Int? { carouselView.selectedIndex }
-    var displayedTrackCount: Int { trackListView.trackCount }
+    var displayedTrackCount: Int {
+        switch trackListMode {
+        case .vertical: return trackListView.trackCount
+        case .horizontal: return horizontalTrackListView.trackCount
+        case .off: return tracks.count
+        }
+    }
+    var renderedVerticalTrackRowCount: Int { trackListView.renderedRowCount }
     var isTrackListVisible: Bool { trackListMode != .off }
     var displayedLyricLineCount: Int { lyricsView.lineCount }
     var currentLyricText: String? { lyricsView.currentLineText }
@@ -130,7 +148,17 @@ final class PlayerPopoverView: NSView {
             position: position,
             duration: duration
         )
-        lyricsView.updatePosition(position)
+    }
+
+    func updatePlaybackPosition(_ position: TimeInterval, duration: TimeInterval) {
+        nowPlayingView.updatePlaybackPosition(position, duration: duration)
+    }
+
+    func setSurfaceActive(_ active: Bool) {
+        guard isSurfaceActive != active else { return }
+        isSurfaceActive = active
+        nowPlayingView.setActive(active)
+        notifyVisibleTrackIDs()
     }
 
     func setNowPlayingArtwork(_ image: NSImage?) {
@@ -168,22 +196,28 @@ final class PlayerPopoverView: NSView {
     func setLyricsLoading() {
         currentLyricsTimeline = nil
         lyricsPlaceholderKey = .loadingLyrics
-        renderLyrics()
+        lyricsNeedsRender = true
+        renderLyricsIfVisible()
     }
 
     func setLyricsTimeline(_ timeline: LyricsTimeline?) {
         currentLyricsTimeline = timeline
         lyricsPlaceholderKey = .lyricsUnavailable
-        renderLyrics()
+        lyricsNeedsRender = true
+        renderLyricsIfVisible()
     }
 
     func updateLyricsPosition(_ position: TimeInterval) {
-        lyricsView.updatePosition(position)
+        currentLyricsPosition = position
+        if isLyricsVisible {
+            lyricsView.updatePosition(position)
+        }
     }
 
     func setLyricsVisible(_ visible: Bool) {
         guard visible != isLyricsVisible else { return }
         isLyricsVisible = visible
+        renderLyricsIfVisible()
         nowPlayingView.setLyricsVisible(visible)
         applyContentModeChange()
     }
@@ -224,44 +258,42 @@ final class PlayerPopoverView: NSView {
     func setTrackState(_ key: AppStringKey) {
         tracks = []
         trackStatusKey = key
-        trackListView.update(
-            tracks: [],
-            placeholder: language.localized(key),
-            language: language
-        )
-        horizontalTrackListView.update(
-            tracks: [],
-            placeholder: language.localized(key),
-            language: language
-        )
+        trackArtworkCache.removeAllObjects()
+        renderActiveTrackList()
         updateCurrentTrackSelection()
     }
 
     func setTracks(_ tracks: [LibraryTrackSnapshot]) {
+        if tracks.map(\.id) != self.tracks.map(\.id) {
+            trackArtworkCache.removeAllObjects()
+        }
         self.tracks = tracks
         trackStatusKey = tracks.isEmpty ? .emptyTracks : nil
-        trackListView.update(
-            tracks: tracks,
-            placeholder: trackStatusKey.map { language.localized($0) } ?? "",
-            language: language
-        )
-        horizontalTrackListView.update(
-            tracks: tracks,
-            placeholder: trackStatusKey.map { language.localized($0) } ?? "",
-            language: language
-        )
+        renderActiveTrackList()
         updateCurrentTrackSelection()
     }
 
     func hideTracks() {
         tracks = []
         trackStatusKey = nil
+        trackArtworkCache.removeAllObjects()
         trackListView.update(tracks: [], placeholder: "", language: language)
         horizontalTrackListView.update(tracks: [], placeholder: "", language: language)
+        notifyVisibleTrackIDs()
         updateCurrentTrackSelection()
     }
 
     func setTrackArtwork(_ image: NSImage?, for trackID: String) {
+        let key = trackID as NSString
+        if let image {
+            let pixelCost = max(
+                1,
+                Int(image.size.width * image.size.height * 4)
+            )
+            trackArtworkCache.setObject(image, forKey: key, cost: pixelCost)
+        } else {
+            trackArtworkCache.removeObject(forKey: key)
+        }
         trackListView.setArtwork(image, for: trackID)
         horizontalTrackListView.setArtwork(image, for: trackID)
     }
@@ -269,7 +301,9 @@ final class PlayerPopoverView: NSView {
     func setTrackListMode(_ mode: TrackListDisplayMode) {
         guard mode != trackListMode else { return }
         trackListMode = mode
+        renderActiveTrackList()
         applyContentModeChange()
+        notifyVisibleTrackIDs()
     }
 
     func setTrackListVisible(_ visible: Bool) {
@@ -288,17 +322,9 @@ final class PlayerPopoverView: NSView {
                 language: language
             )
         }
-        trackListView.update(
-            tracks: tracks,
-            placeholder: trackStatusKey.map { language.localized($0) } ?? "",
-            language: language
-        )
-        horizontalTrackListView.update(
-            tracks: tracks,
-            placeholder: trackStatusKey.map { language.localized($0) } ?? "",
-            language: language
-        )
-        renderLyrics()
+        renderActiveTrackList()
+        lyricsNeedsRender = true
+        renderLyricsIfVisible()
         updateCurrentTrackSelection()
     }
 
@@ -408,9 +434,20 @@ final class PlayerPopoverView: NSView {
         trackListView.onTrackSelected = { [weak self] track, index in
             self?.onTrackSelected?(track, index)
         }
+        trackListView.onVisibleTrackIDsChange = { [weak self] _ in
+            self?.notifyVisibleTrackIDs()
+        }
         horizontalTrackListView.onTrackSelected = { [weak self] track, index in
             self?.onTrackSelected?(track, index)
         }
+        horizontalTrackListView.onVisibleTrackIDsChange = { [weak self] _ in
+            self?.notifyVisibleTrackIDs()
+        }
+        let artworkProvider: (String) -> NSImage? = { [weak self] trackID in
+            self?.trackArtworkCache.object(forKey: trackID as NSString)
+        }
+        trackListView.artworkProvider = artworkProvider
+        horizontalTrackListView.artworkProvider = artworkProvider
         horizontalTrackListView.onPlayPause = { [weak self] in
             self?.onPlayPause?()
         }
@@ -428,6 +465,13 @@ final class PlayerPopoverView: NSView {
             placeholder: language.localized(lyricsPlaceholderKey),
             language: language
         )
+        lyricsView.updatePosition(currentLyricsPosition)
+        lyricsNeedsRender = false
+    }
+
+    private func renderLyricsIfVisible() {
+        guard isLyricsVisible, lyricsNeedsRender else { return }
+        renderLyrics()
     }
 
     private func updateContentVisibility() {
@@ -435,6 +479,52 @@ final class PlayerPopoverView: NSView {
         trackListView.isHidden = isLyricsVisible || trackListMode != .vertical
         horizontalTrackListView.isHidden = isLyricsVisible || trackListMode != .horizontal
         nowPlayingView.setTrackListVisible(!isLyricsVisible && trackListMode != .off)
+        notifyVisibleTrackIDs()
+    }
+
+    private func renderActiveTrackList() {
+        let placeholder = trackStatusKey.map { language.localized($0) } ?? ""
+        switch trackListMode {
+        case .off:
+            trackListView.update(tracks: [], placeholder: "", language: language)
+            horizontalTrackListView.update(tracks: [], placeholder: "", language: language)
+        case .vertical:
+            horizontalTrackListView.update(tracks: [], placeholder: "", language: language)
+            trackListView.update(tracks: tracks, placeholder: placeholder, language: language)
+        case .horizontal:
+            trackListView.update(tracks: [], placeholder: "", language: language)
+            horizontalTrackListView.update(
+                tracks: tracks,
+                placeholder: placeholder,
+                language: language
+            )
+        }
+        notifyVisibleTrackIDs()
+    }
+
+    private func notifyVisibleTrackIDs() {
+        let ids: [String]
+        if !isSurfaceActive || isLyricsVisible {
+            ids = []
+        } else {
+            switch trackListMode {
+            case .off: ids = []
+            case .vertical: ids = trackListView.visibleTrackIDs
+            case .horizontal: ids = horizontalTrackListView.visibleTrackIDs
+            }
+        }
+        let uniqueIDs = ids.reduce(into: [String]()) { result, id in
+            if !result.contains(id) { result.append(id) }
+        }
+        guard uniqueIDs != lastVisibleTrackIDs else { return }
+        lastVisibleTrackIDs = uniqueIDs
+        for id in uniqueIDs {
+            if let image = trackArtworkCache.object(forKey: id as NSString) {
+                trackListView.setArtwork(image, for: id)
+                horizontalTrackListView.setArtwork(image, for: id)
+            }
+        }
+        onVisibleTrackIDsChange?(uniqueIDs)
     }
 
     private func applyContentModeChange() {
@@ -702,6 +792,8 @@ final class SongSearchInputView: NSView, NSTextViewDelegate {
 private final class TrackCarouselView: NSView {
     var onTrackSelected: ((LibraryTrackSnapshot, Int) -> Void)?
     var onPlayPause: (() -> Void)?
+    var onVisibleTrackIDsChange: (([String]) -> Void)?
+    var artworkProvider: ((String) -> NSImage?)?
 
     private let farLeftCard = TrackCarouselCard()
     private let leftCard = TrackCarouselCard()
@@ -716,7 +808,6 @@ private final class TrackCarouselView: NSView {
     private var originalTrackIndexes: [Int] = []
     private var sourcePlaceholder = ""
     private var language = AppLanguage.load()
-    private var artworkByID: [String: NSImage] = [:]
     private var currentTrackID: String?
     private var isCurrentTrackPlaying = false
     private var selectedIndex: Int?
@@ -737,6 +828,14 @@ private final class TrackCarouselView: NSView {
             (rightCard, 1),
             (farRightCard, 2)
         ]
+    }
+
+    var trackCount: Int { tracks.count }
+    var visibleTrackIDs: [String] {
+        cardSlots.compactMap { card, _ in
+            guard !card.isHidden, tracks.indices.contains(card.tag) else { return nil }
+            return tracks[card.tag].id
+        }
     }
 
     init() {
@@ -781,8 +880,6 @@ private final class TrackCarouselView: NSView {
         }
         searchField.placeholderString = language.localized(.searchSongs)
         searchField.isInputEnabled = !tracks.isEmpty
-        let visibleIDs = Set(tracks.map(\.id))
-        artworkByID = artworkByID.filter { visibleIDs.contains($0.key) }
         applySearch(preferredTrackID: previouslySelectedID)
     }
 
@@ -814,12 +911,8 @@ private final class TrackCarouselView: NSView {
     }
 
     func setArtwork(_ image: NSImage?, for trackID: String) {
-        if let image {
-            artworkByID[trackID] = image
-        } else {
-            artworkByID.removeValue(forKey: trackID)
-        }
-        if !isAnimating { renderCards() }
+        guard visibleTrackIDs.contains(trackID), !isAnimating else { return }
+        renderCards()
     }
 
     func setCurrentTrackID(_ trackID: String?) {
@@ -1011,6 +1104,7 @@ private final class TrackCarouselView: NSView {
     private func renderCards() {
         guard let selectedIndex, !tracks.isEmpty else {
             cardSlots.forEach { $0.card.isHidden = true }
+            onVisibleTrackIDsChange?([])
             return
         }
         for (card, relativePosition) in cardSlots {
@@ -1037,7 +1131,7 @@ private final class TrackCarouselView: NSView {
             card.tag = index
             card.configure(
                 track: track,
-                image: artworkByID[track.id],
+                image: artworkProvider?(track.id),
                 prominence: prominence,
                 isCurrent: track.id == currentTrackID,
                 isPlaying: track.id == currentTrackID && isCurrentTrackPlaying,
@@ -1045,6 +1139,7 @@ private final class TrackCarouselView: NSView {
             )
         }
         layoutCards(at: continuousOffset)
+        onVisibleTrackIDsChange?(visibleTrackIDs)
     }
 
     @objc private func cardPressed(_ sender: NSButton) {
@@ -1720,12 +1815,21 @@ private final class PlaylistTrackListView: NSView {
     private var tracks: [LibraryTrackSnapshot] = []
     private var placeholder = ""
     private var language = AppLanguage.load()
+    private var boundsObserver: NSObjectProtocol?
 
     var onTrackSelected: ((LibraryTrackSnapshot, Int) -> Void)? {
         didSet { contentView.onTrackSelected = onTrackSelected }
     }
+    var onVisibleTrackIDsChange: (([String]) -> Void)? {
+        didSet { contentView.onVisibleTrackIDsChange = onVisibleTrackIDsChange }
+    }
+    var artworkProvider: ((String) -> NSImage?)? {
+        didSet { contentView.artworkProvider = artworkProvider }
+    }
 
     var trackCount: Int { contentView.trackCount }
+    var renderedRowCount: Int { contentView.renderedRowCount }
+    var visibleTrackIDs: [String] { contentView.visibleTrackIDs }
 
     init() {
         super.init(frame: NSRect(x: 0, y: 0, width: 240, height: 286))
@@ -1746,7 +1850,23 @@ private final class PlaylistTrackListView: NSView {
         scrollView.autohidesScrollers = true
         scrollView.scrollerStyle = .overlay
         scrollView.documentView = contentView
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        boundsObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification,
+            object: scrollView.contentView,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.updateVisibleRows()
+            }
+        }
         addSubview(scrollView)
+    }
+
+    deinit {
+        if let boundsObserver {
+            NotificationCenter.default.removeObserver(boundsObserver)
+        }
     }
 
     @available(*, unavailable)
@@ -1791,6 +1911,7 @@ private final class PlaylistTrackListView: NSView {
         let targetY = min(maximumY, max(0, rowFrame.midY - clipView.bounds.height / 2))
         clipView.setBoundsOrigin(NSPoint(x: 0, y: targetY))
         scrollView.reflectScrolledClipView(clipView)
+        updateVisibleRows()
     }
 
     override func layout() {
@@ -1800,6 +1921,7 @@ private final class PlaylistTrackListView: NSView {
         artistHeading.frame = NSRect(x: bounds.width - 72, y: bounds.height - 52, width: 64, height: 18)
         scrollView.frame = NSRect(x: 0, y: 0, width: bounds.width, height: bounds.height - 55)
         contentView.resize(to: scrollView.contentSize)
+        updateVisibleRows()
     }
 
     private func renderFilteredTracks() {
@@ -1818,35 +1940,55 @@ private final class PlaylistTrackListView: NSView {
         }
         contentView.update(
             indexedTracks: indexedTracks,
-            retainingArtworkForIDs: Set(tracks.map(\.id)),
             placeholder: filteredPlaceholder,
             language: language
         )
         needsLayout = true
         layoutSubtreeIfNeeded()
+        updateVisibleRows()
     }
 
     private func searchChanged() {
         guard SearchCompositionState.shouldApplyChange(in: searchField.textView) else { return }
         renderFilteredTracks()
     }
+
+    private func updateVisibleRows() {
+        contentView.updateVisibleRows(in: scrollView.contentView.bounds)
+    }
 }
 
 @MainActor
 private final class TrackListContentView: NSView {
     private static let rowHeight: CGFloat = 52
-    private var rows: [TrackRowView] = []
-    private var rowsByID: [String: TrackRowView] = [:]
-    private var artworkByID: [String: NSImage] = [:]
+    private static let overscanRows = 2
+    private var indexedTracks: [(index: Int, track: LibraryTrackSnapshot)] = []
+    private var rowsByPosition: [Int: TrackRowView] = [:]
+    private var language = AppLanguage.load()
+    private var lastVisibleRect = NSRect.zero
+    private var lastNotifiedTrackIDs: [String] = []
     private var currentTrackID: String?
     private let placeholderLabel = NSTextField(labelWithString: "")
 
     var onTrackSelected: ((LibraryTrackSnapshot, Int) -> Void)?
+    var onVisibleTrackIDsChange: (([String]) -> Void)?
+    var artworkProvider: ((String) -> NSImage?)?
 
     override var isFlipped: Bool { true }
-    var trackCount: Int { rows.count }
+    var trackCount: Int { indexedTracks.count }
+    var renderedRowCount: Int { rowsByPosition.count }
+    var visibleTrackIDs: [String] {
+        rowsByPosition.keys.sorted().compactMap { position in
+            guard indexedTracks.indices.contains(position) else { return nil }
+            return indexedTracks[position].track.id
+        }
+    }
     var currentTrackFrame: NSRect? {
-        currentTrackID.flatMap { rowsByID[$0]?.frame }
+        guard
+            let currentTrackID,
+            let position = indexedTracks.firstIndex(where: { $0.track.id == currentTrackID })
+        else { return nil }
+        return frameForRow(at: position)
     }
 
     init() {
@@ -1865,64 +2007,83 @@ private final class TrackListContentView: NSView {
 
     func update(
         indexedTracks: [(index: Int, track: LibraryTrackSnapshot)],
-        retainingArtworkForIDs trackIDs: Set<String>,
         placeholder: String,
         language: AppLanguage
     ) {
-        if !trackIDs.isEmpty {
-            artworkByID = artworkByID.filter { trackIDs.contains($0.key) }
-        }
-        rows.forEach { $0.removeFromSuperview() }
-        rows = indexedTracks.map { index, track in
-            let row = TrackRowView()
-            row.update(track: track, language: language)
-            row.setArtwork(artworkByID[track.id])
-            row.setCurrent(track.id == currentTrackID)
-            row.onPlay = { [weak self] in
-                self?.onTrackSelected?(track, index)
-            }
-            addSubview(row)
-            return row
-        }
-        rowsByID = Dictionary(
-            uniqueKeysWithValues: zip(indexedTracks.map(\.track.id), rows)
-        )
+        self.indexedTracks = indexedTracks
+        self.language = language
+        rowsByPosition.values.forEach { $0.removeFromSuperview() }
+        rowsByPosition = [:]
         placeholderLabel.stringValue = placeholder
         placeholderLabel.isHidden = !indexedTracks.isEmpty
+        lastNotifiedTrackIDs = []
         needsLayout = true
+        resize(to: bounds.size)
+        updateVisibleRows(in: lastVisibleRect)
     }
 
     func setArtwork(_ image: NSImage?, for trackID: String) {
-        if let image {
-            artworkByID[trackID] = image
-        } else {
-            artworkByID.removeValue(forKey: trackID)
+        for (position, row) in rowsByPosition where indexedTracks.indices.contains(position) {
+            if indexedTracks[position].track.id == trackID {
+                row.setArtwork(image)
+            }
         }
-        rowsByID[trackID]?.setArtwork(image)
     }
 
     func setCurrentTrackID(_ trackID: String?) {
         currentTrackID = trackID
-        for (id, row) in rowsByID {
-            row.setCurrent(id == trackID)
+        for (position, row) in rowsByPosition where indexedTracks.indices.contains(position) {
+            row.setCurrent(indexedTracks[position].track.id == trackID)
         }
     }
 
     func resize(to viewportSize: NSSize) {
-        let height = max(viewportSize.height, CGFloat(rows.count) * Self.rowHeight)
+        let height = max(viewportSize.height, CGFloat(indexedTracks.count) * Self.rowHeight)
         frame.size = NSSize(width: viewportSize.width, height: height)
         needsLayout = true
     }
 
+    func updateVisibleRows(in visibleRect: NSRect) {
+        lastVisibleRect = visibleRect
+        guard !indexedTracks.isEmpty, visibleRect.width > 0, visibleRect.height > 0 else {
+            rowsByPosition.values.forEach { $0.removeFromSuperview() }
+            rowsByPosition = [:]
+            notifyVisibleTracksIfNeeded()
+            return
+        }
+
+        let firstVisible = max(0, Int(floor(visibleRect.minY / Self.rowHeight)))
+        let lastVisible = min(
+            indexedTracks.count - 1,
+            Int(floor(max(visibleRect.minY, visibleRect.maxY - 1) / Self.rowHeight))
+        )
+        let lowerBound = max(0, firstVisible - Self.overscanRows)
+        let upperBound = min(indexedTracks.count - 1, lastVisible + Self.overscanRows)
+        let neededPositions = Set(lowerBound...upperBound)
+
+        for position in Array(rowsByPosition.keys) where !neededPositions.contains(position) {
+            rowsByPosition.removeValue(forKey: position)?.removeFromSuperview()
+        }
+        for position in lowerBound...upperBound where rowsByPosition[position] == nil {
+            let item = indexedTracks[position]
+            let row = TrackRowView()
+            row.update(track: item.track, language: language)
+            row.setArtwork(artworkProvider?(item.track.id))
+            row.setCurrent(item.track.id == currentTrackID)
+            row.onPlay = { [weak self] in
+                self?.onTrackSelected?(item.track, item.index)
+            }
+            row.frame = frameForRow(at: position)
+            addSubview(row, positioned: .below, relativeTo: placeholderLabel)
+            rowsByPosition[position] = row
+        }
+        notifyVisibleTracksIfNeeded()
+    }
+
     override func layout() {
         super.layout()
-        for (index, row) in rows.enumerated() {
-            row.frame = NSRect(
-                x: 0,
-                y: CGFloat(index) * Self.rowHeight,
-                width: bounds.width,
-                height: Self.rowHeight
-            )
+        for (position, row) in rowsByPosition {
+            row.frame = frameForRow(at: position)
         }
         placeholderLabel.frame = NSRect(
             x: 12,
@@ -1930,6 +2091,22 @@ private final class TrackListContentView: NSView {
             width: max(0, bounds.width - 24),
             height: 42
         )
+    }
+
+    private func frameForRow(at position: Int) -> NSRect {
+        NSRect(
+            x: 0,
+            y: CGFloat(position) * Self.rowHeight,
+            width: bounds.width,
+            height: Self.rowHeight
+        )
+    }
+
+    private func notifyVisibleTracksIfNeeded() {
+        let ids = visibleTrackIDs
+        guard ids != lastNotifiedTrackIDs else { return }
+        lastNotifiedTrackIDs = ids
+        onVisibleTrackIDsChange?(ids)
     }
 }
 

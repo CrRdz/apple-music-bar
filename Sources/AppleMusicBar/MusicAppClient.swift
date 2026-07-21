@@ -10,29 +10,117 @@ enum MusicCommand: Sendable {
 actor MusicAppClient {
     private let musicBundleIdentifier = "com.apple.Music"
 
+    private static let nowPlayingMetadataSource = """
+    tell application "Music"
+        if player state is stopped then return {"stopped", "", "", "", "0", "0"}
+
+        set currentItem to current track
+        return {(player state as text), (name of currentItem), (artist of currentItem), (album of currentItem), (duration of currentItem as text), (player position as text)}
+    end tell
+    """
+
+    private static let nowPlayingWithLyricsSource = """
+    tell application "Music"
+        if player state is stopped then return {"stopped", "", "", "", "0", "0", ""}
+
+        set currentItem to current track
+        set itemLyrics to ""
+        try
+            set itemLyrics to lyrics of currentItem
+        end try
+
+        return {(player state as text), (name of currentItem), (artist of currentItem), (album of currentItem), (duration of currentItem as text), (player position as text), itemLyrics}
+    end tell
+    """
+
+    private static let currentPlaylistSource = """
+    tell application "Music"
+        if player state is stopped then return ""
+        try
+            return name of current playlist
+        on error
+            return ""
+        end try
+    end tell
+    """
+
+    private static let currentArtworkSource = """
+    tell application "Music"
+        if player state is stopped then return missing value
+        try
+            return raw data of artwork 1 of current track
+        on error
+            return missing value
+        end try
+    end tell
+    """
+
+    private lazy var nowPlayingMetadataScript = NSAppleScript(
+        source: Self.nowPlayingMetadataSource
+    )
+    private lazy var nowPlayingWithLyricsScript = NSAppleScript(
+        source: Self.nowPlayingWithLyricsSource
+    )
+    private lazy var currentPlaylistScript = NSAppleScript(
+        source: Self.currentPlaylistSource
+    )
+    private lazy var currentArtworkScript = NSAppleScript(
+        source: Self.currentArtworkSource
+    )
+    private var cachedTrackKey: TrackKey?
+    private var cachedEmbeddedLyrics = ""
+
     func nowPlaying() -> MusicReadResult {
         guard !NSRunningApplication.runningApplications(
             withBundleIdentifier: musicBundleIdentifier
         ).isEmpty else {
+            clearNowPlayingCache()
             return .notRunning
         }
 
-        let source = """
-        tell application "Music"
-            if player state is stopped then return {"stopped", "", "", "", "0", "0", ""}
+        let metadataResult = readNowPlaying(
+            using: nowPlayingMetadataScript,
+            includesLyrics: false
+        )
+        guard case .track(let metadata) = metadataResult else {
+            clearNowPlayingCache()
+            return metadataResult
+        }
 
-            set currentItem to current track
-            set itemLyrics to ""
-            try
-                set itemLyrics to lyrics of currentItem
-            end try
+        if metadata.key == cachedTrackKey {
+            return .track(TrackSnapshot(
+                title: metadata.title,
+                artist: metadata.artist,
+                album: metadata.album,
+                duration: metadata.duration,
+                position: metadata.position,
+                state: metadata.state,
+                embeddedLyrics: cachedEmbeddedLyrics
+            ))
+        }
 
-            return {(player state as text), (name of currentItem), (artist of currentItem), (album of currentItem), (duration of currentItem as text), (player position as text), itemLyrics}
-        end tell
-        """
+        // Reading complete lyrics through AppleScript is comparatively expensive.
+        // Re-read the full snapshot only on a track transition so its metadata and
+        // lyrics still come from the same Apple Music item.
+        let detailedResult = readNowPlaying(
+            using: nowPlayingWithLyricsScript,
+            includesLyrics: true
+        )
+        if case .track(let track) = detailedResult {
+            cachedTrackKey = track.key
+            cachedEmbeddedLyrics = track.embeddedLyrics
+        } else {
+            clearNowPlayingCache()
+        }
+        return detailedResult
+    }
 
+    private func readNowPlaying(
+        using script: NSAppleScript?,
+        includesLyrics: Bool
+    ) -> MusicReadResult {
         var errorInfo: NSDictionary?
-        let result = NSAppleScript(source: source)?.executeAndReturnError(&errorInfo)
+        let result = script?.executeAndReturnError(&errorInfo)
 
         if let errorInfo {
             let number = errorInfo[NSAppleScript.errorNumber] as? Int
@@ -45,7 +133,8 @@ actor MusicAppClient {
             return .failed(message)
         }
 
-        guard let result, result.numberOfItems >= 7 else {
+        let requiredItemCount = includesLyrics ? 7 : 6
+        guard let result, result.numberOfItems >= requiredItemCount else {
             return .noTrack
         }
 
@@ -59,18 +148,22 @@ actor MusicAppClient {
             return .noTrack
         }
 
-        let state: PlaybackState = stateText == "playing" ? .playing : .paused
-        let snapshot = TrackSnapshot(
+        return .track(TrackSnapshot(
             title: title,
             artist: result.atIndex(3)?.stringValue ?? "",
             album: result.atIndex(4)?.stringValue ?? "",
             duration: Double(result.atIndex(5)?.stringValue ?? "0") ?? 0,
             position: Double(result.atIndex(6)?.stringValue ?? "0") ?? 0,
-            state: state,
-            embeddedLyrics: result.atIndex(7)?.stringValue ?? ""
-        )
+            state: stateText == "playing" ? .playing : .paused,
+            embeddedLyrics: includesLyrics
+                ? result.atIndex(7)?.stringValue ?? ""
+                : ""
+        ))
+    }
 
-        return .track(snapshot)
+    private func clearNowPlayingCache() {
+        cachedTrackKey = nil
+        cachedEmbeddedLyrics = ""
     }
 
     func send(_ command: MusicCommand) {
@@ -301,19 +394,8 @@ actor MusicAppClient {
             withBundleIdentifier: musicBundleIdentifier
         ).isEmpty else { return nil }
 
-        let source = """
-        tell application "Music"
-            if player state is stopped then return ""
-            try
-                return name of current playlist
-            on error
-                return ""
-            end try
-        end tell
-        """
-
         var errorInfo: NSDictionary?
-        let value = NSAppleScript(source: source)?
+        let value = currentPlaylistScript?
             .executeAndReturnError(&errorInfo)
             .stringValue?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -325,19 +407,8 @@ actor MusicAppClient {
             withBundleIdentifier: musicBundleIdentifier
         ).isEmpty else { return nil }
 
-        let source = """
-        tell application "Music"
-            if player state is stopped then return missing value
-            try
-                return raw data of artwork 1 of current track
-            on error
-                return missing value
-            end try
-        end tell
-        """
-
         var errorInfo: NSDictionary?
-        return NSAppleScript(source: source)?
+        return currentArtworkScript?
             .executeAndReturnError(&errorInfo)
             .data
     }

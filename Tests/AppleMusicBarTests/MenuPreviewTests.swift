@@ -698,6 +698,9 @@ final class MenuPreviewTests: XCTestCase {
         XCTAssertEqual(pulse.renderedBarHeights, [3, 3, 3, 3, 3])
 
         pulse.setPlaying(true)
+        XCTAssertFalse(pulse.isAnimating)
+        pulse.setActive(true)
+        XCTAssertTrue(pulse.isAnimating)
 
         let heights = pulse.renderedBarHeights
         XCTAssertEqual(heights.count, 5)
@@ -706,6 +709,56 @@ final class MenuPreviewTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(heights.min() ?? 0, 3)
 
         pulse.setPlaying(false)
+        XCTAssertFalse(pulse.isAnimating)
+    }
+
+    @MainActor
+    func testLargeVerticalPlaylistOnlyCreatesVisibleRows() {
+        let view = PlayerPopoverView()
+        let tracks = (0..<2_000).map { index in
+            LibraryTrackSnapshot(
+                id: "track-\(index)",
+                title: "Song \(index)",
+                album: "Album",
+                artist: "Artist",
+                artworkURL: nil
+            )
+        }
+
+        view.setTracks(tracks)
+        view.setTrackListMode(.vertical)
+        view.frame = NSRect(origin: .zero, size: view.intrinsicContentSize)
+        view.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(view.displayedTrackCount, tracks.count)
+        XCTAssertGreaterThan(view.renderedVerticalTrackRowCount, 0)
+        XCTAssertLessThan(view.renderedVerticalTrackRowCount, 20)
+    }
+
+    @MainActor
+    func testArtworkRequestsFollowVisibleSurface() {
+        let view = PlayerPopoverView()
+        let tracks = (0..<100).map { index in
+            LibraryTrackSnapshot(
+                id: "track-\(index)",
+                title: "Song \(index)",
+                album: "Album",
+                artist: "Artist",
+                artworkURL: URL(string: "https://example.com/\(index).jpg")
+            )
+        }
+        var requests: [[String]] = []
+        view.onVisibleTrackIDsChange = { requests.append($0) }
+        view.setTracks(tracks)
+        view.setTrackListMode(.horizontal)
+
+        XCTAssertTrue(requests.isEmpty || requests.last?.isEmpty == true)
+        view.setSurfaceActive(true)
+        XCTAssertGreaterThan(requests.last?.count ?? 0, 0)
+        XCTAssertLessThanOrEqual(requests.last?.count ?? 0, 5)
+
+        view.setSurfaceActive(false)
+        XCTAssertEqual(requests.last, [])
     }
 
     @MainActor
@@ -861,6 +914,7 @@ final class MenuPreviewTests: XCTestCase {
         view.setTrackArtwork(artwork, for: track.id)
 
         view.updateLocalization(.traditionalChinese)
+        view.setTrackListMode(.vertical)
         view.frame = NSRect(origin: .zero, size: view.intrinsicContentSize)
         view.layoutSubtreeIfNeeded()
 

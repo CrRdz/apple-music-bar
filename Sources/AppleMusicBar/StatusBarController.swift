@@ -3,7 +3,7 @@ import Foundation
 
 @MainActor
 final class StatusBarController: NSObject, NSMenuDelegate {
-    private enum UnavailableState {
+    private enum UnavailableState: Equatable {
         case notRunning
         case noTrack
         case unauthorized
@@ -21,7 +21,10 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     private let maximumWidth: CGFloat = 360
     private let horizontalPadding: CGFloat = 18
-    private let marqueeInterval: TimeInterval = 0.16
+    private let marqueeInterval: TimeInterval = 0.20
+    private let statusFont = NSFont.systemFont(ofSize: 13, weight: .medium)
+    private let playingFallbackPollInterval: TimeInterval = 15
+    private let idleFallbackPollInterval: TimeInterval = 45
     private let playlistIdentityFailureTTL: TimeInterval = 15
     private let hiddenPlaylistIDsDefaultsKey = "hiddenPlaylistIDs"
 
@@ -59,9 +62,14 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private var libraryGeneration = 0
     private var playlistGeneration = 0
     private var pollingTimer: Timer?
+    private var playbackUITimer: Timer?
+    private var lyricTransitionTimer: Timer?
     private var marqueeTimer: Timer?
     private var isPolling = false
+    private var shouldPollAgain = false
+    private var isSessionActive = true
     private var currentTrack: TrackSnapshot?
+    private var positionAnchorUptime = ProcessInfo.processInfo.systemUptime
     private var currentTimeline: LyricsTimeline?
     private var lyricsTask: Task<Void, Never>?
     private var artworkTask: Task<Void, Never>?
@@ -72,8 +80,12 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private var trackArtworkTask: Task<Void, Never>?
     private var shouldRestorePlaybackFocusAfterPlaylistLoad = false
     private var rawDisplayText = ""
+    private var rawDisplayTextWidth: CGFloat = 0
     private var marqueeCharacters: [Character] = []
+    private var marqueeSlices: [String] = []
     private var marqueeIndex = 0
+    private var distributedNotificationObservers: [NSObjectProtocol] = []
+    private var workspaceNotificationObservers: [NSObjectProtocol] = []
 
     func start() {
         configureStatusItem()
@@ -81,29 +93,13 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         playerView.setTrackListMode(trackListMode)
         refreshLocalizedPresentation()
         loadMusicKitLibrary()
-
-        pollingTimer = Timer.scheduledTimer(
-            timeInterval: 0.5,
-            target: self,
-            selector: #selector(pollMusic),
-            userInfo: nil,
-            repeats: true
-        )
-        marqueeTimer = Timer.scheduledTimer(
-            timeInterval: marqueeInterval,
-            target: self,
-            selector: #selector(advanceMarquee),
-            userInfo: nil,
-            repeats: true
-        )
-        RunLoop.main.add(pollingTimer!, forMode: .common)
-        RunLoop.main.add(marqueeTimer!, forMode: .common)
+        observeMusicChanges()
         pollMusic()
     }
 
     private func configureStatusItem() {
         guard let button = statusItem.button else { return }
-        button.font = .systemFont(ofSize: 13, weight: .medium)
+        button.font = statusFont
         button.alignment = .center
         button.lineBreakMode = .byClipping
         button.toolTip = "Apple Music Bar"
@@ -121,8 +117,19 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         playerMenu.onWillOpen = { [weak self] in
             guard let self else { return }
             NSApp.activate()
+            self.playerView.setSurfaceActive(true)
+            self.refreshPlaybackPresentation()
+            self.updatePlaybackUITimer()
             self.restorePlaybackContext()
             self.playerMenu.updateContentSize(self.playerView.intrinsicContentSize)
+        }
+        playerMenu.onDidClose = { [weak self] in
+            guard let self else { return }
+            self.playerView.setSurfaceActive(false)
+            self.playbackUITimer?.invalidate()
+            self.playbackUITimer = nil
+            self.trackArtworkTask?.cancel()
+            self.trackArtworkTask = nil
         }
         statusItem.menu = playerMenu.menu
         playerView.onTrackListToggle = { [weak self] in self?.toggleTrackList() }
@@ -138,6 +145,9 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         }
         playerView.onTrackSelected = { [weak self] track, index in
             self?.playTrack(track, fallbackIndex: index)
+        }
+        playerView.onVisibleTrackIDsChange = { [weak self] trackIDs in
+            self?.beginVisibleTrackArtworkLookup(trackIDs)
         }
         playerView.onReloadLibrary = { [weak self] in self?.loadMusicKitLibrary() }
         playerView.onPreferredSizeChange = { [weak self] size in
@@ -159,44 +169,162 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func pollMusic() {
-        guard !isPolling else { return }
+        pollingTimer?.invalidate()
+        pollingTimer = nil
+        guard !isPolling else {
+            shouldPollAgain = true
+            return
+        }
         isPolling = true
 
-        Task {
+        Task { [weak self] in
+            guard let self else { return }
             let result = await musicClient.nowPlaying()
             isPolling = false
             handle(result)
+            if shouldPollAgain {
+                shouldPollAgain = false
+                schedulePoll(after: 0.1)
+            } else {
+                scheduleFallbackPoll()
+            }
         }
+    }
+
+    private func observeMusicChanges() {
+        let distributedCenter = DistributedNotificationCenter.default()
+        for rawName in ["com.apple.Music.playerInfo", "com.apple.iTunes.playerInfo"] {
+            let observer = distributedCenter.addObserver(
+                forName: Notification.Name(rawName),
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.schedulePoll(after: 0.1) }
+            }
+            distributedNotificationObservers.append(observer)
+        }
+
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        for name in [
+            NSWorkspace.didLaunchApplicationNotification,
+            NSWorkspace.didTerminateApplicationNotification
+        ] {
+            let observer = workspaceCenter.addObserver(
+                forName: name,
+                object: nil,
+                queue: .main
+            ) { [weak self] notification in
+                guard
+                    let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+                        as? NSRunningApplication,
+                    application.bundleIdentifier == "com.apple.Music"
+                else { return }
+                Task { @MainActor in self?.schedulePoll(after: 0.1) }
+            }
+            workspaceNotificationObservers.append(observer)
+        }
+
+        for name in [
+            NSWorkspace.screensDidSleepNotification,
+            NSWorkspace.sessionDidResignActiveNotification
+        ] {
+            let observer = workspaceCenter.addObserver(
+                forName: name,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.suspendForInactiveSession() }
+            }
+            workspaceNotificationObservers.append(observer)
+        }
+        for name in [
+            NSWorkspace.screensDidWakeNotification,
+            NSWorkspace.sessionDidBecomeActiveNotification
+        ] {
+            let observer = workspaceCenter.addObserver(
+                forName: name,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.resumeForActiveSession() }
+            }
+            workspaceNotificationObservers.append(observer)
+        }
+    }
+
+    private func schedulePoll(after delay: TimeInterval) {
+        guard isSessionActive else { return }
+        if isPolling {
+            shouldPollAgain = true
+            return
+        }
+        pollingTimer?.invalidate()
+        let timer = Timer(timeInterval: max(0.05, delay), repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.pollMusic()
+            }
+        }
+        timer.tolerance = min(1, max(0.02, delay * 0.1))
+        RunLoop.main.add(timer, forMode: .common)
+        pollingTimer = timer
+    }
+
+    private func scheduleFallbackPoll() {
+        let interval = currentTrack?.state == .playing
+            ? playingFallbackPollInterval
+            : idleFallbackPollInterval
+        schedulePoll(after: interval)
+    }
+
+    private func suspendForInactiveSession() {
+        guard isSessionActive else { return }
+        isSessionActive = false
+        pollingTimer?.invalidate()
+        pollingTimer = nil
+        playbackUITimer?.invalidate()
+        playbackUITimer = nil
+        lyricTransitionTimer?.invalidate()
+        lyricTransitionTimer = nil
+        updateMarqueeTimer()
+    }
+
+    private func resumeForActiveSession() {
+        guard !isSessionActive else { return }
+        isSessionActive = true
+        updateMarqueeTimer()
+        scheduleNextLyricTransition()
+        schedulePoll(after: 0.1)
     }
 
     private func handle(_ result: MusicReadResult) {
         switch result {
         case .notRunning:
-            clearTrackState()
-            unavailableState = .notRunning
-            refreshLocalizedPresentation()
+            showUnavailableState(.notRunning)
 
         case .noTrack:
-            clearTrackState()
-            unavailableState = .noTrack
-            refreshLocalizedPresentation()
+            showUnavailableState(.noTrack)
 
         case .unauthorized:
-            clearTrackState()
-            unavailableState = .unauthorized
-            refreshLocalizedPresentation()
+            showUnavailableState(.unauthorized)
 
         case .failed(let message):
-            clearTrackState()
-            unavailableState = .failed(message)
-            refreshLocalizedPresentation()
+            showUnavailableState(.failed(message))
 
         case .track(let track):
+            let previousTrack = currentTrack
             let didChangeTrack = currentTrack?.key != track.key
+            let didChangePlaybackState = previousTrack?.state != track.state
             currentTrack = track
-            playerView.setCurrentTrack(track)
-            updateNowPlayingHeader(for: track)
-            playerView.updateLyricsPosition(track.position)
+            positionAnchorUptime = ProcessInfo.processInfo.systemUptime
+            if didChangeTrack || didChangePlaybackState {
+                playerView.setCurrentTrack(track)
+                updateNowPlayingHeader(for: track)
+            } else if playerMenu.isOpen {
+                playerView.updatePlaybackPosition(track.position, duration: track.duration)
+            }
+            if playerMenu.isOpen {
+                playerView.updateLyricsPosition(track.position)
+            }
 
             if didChangeTrack {
                 currentTimeline = nil
@@ -207,16 +335,27 @@ final class StatusBarController: NSObject, NSMenuDelegate {
                 beginCurrentPlaylistLookup(for: track)
             }
             refreshCurrentDisplayText()
+            updatePlaybackUITimer()
+            scheduleNextLyricTransition()
         }
     }
 
+    private func showUnavailableState(_ state: UnavailableState) {
+        let hadTrack = currentTrack != nil || currentPlaylistName != nil
+        guard hadTrack || unavailableState != state else { return }
+        clearTrackState()
+        unavailableState = state
+        refreshLocalizedPresentation()
+    }
+
     private func updateNowPlayingHeader(for track: TrackSnapshot) {
+        let position = playbackPosition(for: track)
         playerView.updateNowPlaying(
             title: language.displayText(track.title),
             subtitle: language.displayText(track.artist),
             isPlaying: track.state == .playing,
             controlsEnabled: true,
-            position: track.position,
+            position: position,
             duration: track.duration
         )
     }
@@ -261,6 +400,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             currentTimeline = timeline
             playerView.setLyricsTimeline(timeline)
             refreshCurrentDisplayText()
+            scheduleNextLyricTransition()
         }
     }
 
@@ -275,6 +415,10 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         currentTrack = nil
         currentTimeline = nil
         currentPlaylistName = nil
+        playbackUITimer?.invalidate()
+        playbackUITimer = nil
+        lyricTransitionTimer?.invalidate()
+        lyricTransitionTimer = nil
         playerView.setCurrentTrack(nil)
         playerView.setLyricsTimeline(nil)
         playerView.setNowPlayingArtwork(nil)
@@ -340,11 +484,82 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     private func refreshCurrentDisplayText() {
         guard let currentTrack else { return }
-        if let line = currentTimeline?.line(at: currentTrack.position) {
+        let position = playbackPosition(for: currentTrack)
+        if let line = currentTimeline?.line(at: position) {
             setDisplayText(language.displayText(line.text))
         } else {
             setDisplayText(language.displayText(currentTrack.displayName))
         }
+    }
+
+    private func playbackPosition(for track: TrackSnapshot) -> TimeInterval {
+        guard track.state == .playing else { return track.position }
+        let elapsed = max(0, ProcessInfo.processInfo.systemUptime - positionAnchorUptime)
+        let estimated = track.position + elapsed
+        return track.duration > 0 ? min(track.duration, estimated) : estimated
+    }
+
+    private func refreshPlaybackPresentation() {
+        guard let currentTrack else { return }
+        let position = playbackPosition(for: currentTrack)
+        updateNowPlayingHeader(for: currentTrack)
+        playerView.updateLyricsPosition(position)
+    }
+
+    private func updatePlaybackUITimer() {
+        playbackUITimer?.invalidate()
+        playbackUITimer = nil
+        guard
+            isSessionActive,
+            playerMenu.isOpen,
+            currentTrack?.state == .playing
+        else { return }
+
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self, let track = self.currentTrack, track.state == .playing else {
+                    timer.invalidate()
+                    return
+                }
+                let position = self.playbackPosition(for: track)
+                self.playerView.updatePlaybackPosition(position, duration: track.duration)
+                self.playerView.updateLyricsPosition(position)
+                if track.duration > 0, position >= track.duration {
+                    timer.invalidate()
+                    self.schedulePoll(after: 0.1)
+                }
+            }
+        }
+        timer.tolerance = 0.08
+        RunLoop.main.add(timer, forMode: .common)
+        playbackUITimer = timer
+    }
+
+    private func scheduleNextLyricTransition() {
+        lyricTransitionTimer?.invalidate()
+        lyricTransitionTimer = nil
+        guard
+            isSessionActive,
+            let track = currentTrack,
+            track.state == .playing,
+            let timeline = currentTimeline,
+            !timeline.lines.isEmpty
+        else { return }
+
+        let position = playbackPosition(for: track)
+        guard let nextTime = timeline.lines.first(where: { $0.time > position + 0.01 })?.time else {
+            return
+        }
+        let delay = max(0.05, nextTime - position)
+        let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.refreshCurrentDisplayText()
+                self?.scheduleNextLyricTransition()
+            }
+        }
+        timer.tolerance = min(0.08, delay * 0.05)
+        RunLoop.main.add(timer, forMode: .common)
+        lyricTransitionTimer = timer
     }
 
     private func setDisplayText(_ text: String) {
@@ -354,49 +569,90 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         guard value != rawDisplayText else { return }
 
         rawDisplayText = value
+        rawDisplayTextWidth = textWidth(value)
         marqueeCharacters = Array(value + "      ·      ")
+        marqueeSlices = rawDisplayTextWidth + horizontalPadding > maximumWidth
+            ? prepareMarqueeSlices()
+            : []
         marqueeIndex = 0
         renderCurrentText()
+        updateMarqueeTimer()
+        statusItem.button?.setAccessibilityValue(rawDisplayText)
     }
 
     @objc private func advanceMarquee() {
-        guard textWidth(rawDisplayText) + horizontalPadding > maximumWidth else { return }
-        guard !marqueeCharacters.isEmpty else { return }
-        marqueeIndex = (marqueeIndex + 1) % marqueeCharacters.count
-        renderCurrentText()
+        guard !marqueeSlices.isEmpty, let button = statusItem.button else { return }
+        marqueeIndex = (marqueeIndex + 1) % marqueeSlices.count
+        let title = marqueeSlices[marqueeIndex]
+        if button.title != title {
+            button.title = title
+        }
+    }
+
+    private func updateMarqueeTimer() {
+        let shouldRun = isSessionActive
+            && rawDisplayTextWidth + horizontalPadding > maximumWidth
+        if shouldRun, marqueeTimer == nil {
+            let timer = Timer(
+                timeInterval: marqueeInterval,
+                target: self,
+                selector: #selector(advanceMarquee),
+                userInfo: nil,
+                repeats: true
+            )
+            timer.tolerance = marqueeInterval * 0.1
+            RunLoop.main.add(timer, forMode: .common)
+            marqueeTimer = timer
+        } else if !shouldRun {
+            marqueeTimer?.invalidate()
+            marqueeTimer = nil
+        }
     }
 
     private func renderCurrentText() {
         guard let button = statusItem.button else { return }
-        let width = textWidth(rawDisplayText) + horizontalPadding
+        let width = rawDisplayTextWidth + horizontalPadding
 
         if width <= maximumWidth {
             statusItem.length = max(72, width)
-            button.title = rawDisplayText
+            if button.title != rawDisplayText {
+                button.title = rawDisplayText
+            }
         } else {
             statusItem.length = maximumWidth
-            button.title = marqueeSlice()
+            let title = marqueeSlices.indices.contains(marqueeIndex)
+                ? marqueeSlices[marqueeIndex]
+                : rawDisplayText
+            if button.title != title {
+                button.title = title
+            }
         }
-        button.setAccessibilityValue(rawDisplayText)
     }
 
-    private func marqueeSlice() -> String {
-        guard !marqueeCharacters.isEmpty else { return rawDisplayText }
+    private func prepareMarqueeSlices() -> [String] {
+        guard !marqueeCharacters.isEmpty else { return [rawDisplayText] }
         let availableWidth = maximumWidth - horizontalPadding
-        var result = ""
-
-        for offset in 0..<marqueeCharacters.count {
-            let index = (marqueeIndex + offset) % marqueeCharacters.count
-            let candidate = result + String(marqueeCharacters[index])
-            if textWidth(candidate) > availableWidth { break }
-            result = candidate
+        let characterWidths = marqueeCharacters.map { textWidth(String($0)) }
+        return marqueeCharacters.indices.map { startIndex in
+            var characters: [Character] = []
+            var estimatedWidth: CGFloat = 0
+            for offset in 0..<marqueeCharacters.count {
+                let index = (startIndex + offset) % marqueeCharacters.count
+                let nextWidth = characterWidths[index]
+                if estimatedWidth + nextWidth > availableWidth { break }
+                characters.append(marqueeCharacters[index])
+                estimatedWidth += nextWidth
+            }
+            var result = String(characters)
+            while !result.isEmpty, textWidth(result) > availableWidth {
+                result.removeLast()
+            }
+            return result
         }
-        return result
     }
 
     private func textWidth(_ text: String) -> CGFloat {
-        let font = NSFont.systemFont(ofSize: 13, weight: .medium)
-        return ceil((text as NSString).size(withAttributes: [.font: font]).width)
+        ceil((text as NSString).size(withAttributes: [.font: statusFont]).width)
     }
 
     private func loadMusicKitLibrary() {
@@ -574,11 +830,6 @@ final class StatusBarController: NSObject, NSMenuDelegate {
                    generation == playlistGeneration {
                     playerView.setPlaylistArtwork(NSImage(data: data), for: playlist.id)
                 }
-                beginTrackArtworkLookup(
-                    content.tracks,
-                    playlistID: playlist.id,
-                    generation: generation
-                )
             } catch {
                 guard
                     !Task.isCancelled,
@@ -730,40 +981,41 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         }
     }
 
-    private func beginTrackArtworkLookup(
-        _ tracks: [LibraryTrackSnapshot],
-        playlistID: String,
-        generation: Int
-    ) {
+    private func beginVisibleTrackArtworkLookup(_ trackIDs: [String]) {
         trackArtworkTask?.cancel()
+        trackArtworkTask = nil
+        guard
+            !trackIDs.isEmpty,
+            let selectedPlaylistIndex,
+            playlists.indices.contains(selectedPlaylistIndex)
+        else { return }
+
+        let playlistID = playlists[selectedPlaylistIndex].id
+        let generation = playlistGeneration
+        let tracksByID = Dictionary(
+            uniqueKeysWithValues: selectedPlaylistTracks.map { ($0.id, $0) }
+        )
+        let visibleTracks = trackIDs.compactMap { tracksByID[$0] }
+        guard !visibleTracks.isEmpty else { return }
         let client = musicKitLibraryClient
         trackArtworkTask = Task {
-            let tracksWithArtwork = tracks.filter { $0.artworkURL != nil }
-            for startIndex in stride(from: 0, to: tracksWithArtwork.count, by: 6) {
-                guard
-                    !Task.isCancelled,
-                    generation == playlistGeneration,
-                    selectedPlaylistIndex.flatMap({ playlists.indices.contains($0) ? playlists[$0].id : nil }) == playlistID
-                else { return }
-
-                let endIndex = min(startIndex + 6, tracksWithArtwork.count)
-                let chunk = Array(tracksWithArtwork[startIndex..<endIndex])
-                await withTaskGroup(of: (String, Data?).self) { group in
-                    for track in chunk {
-                        group.addTask {
-                            guard let url = track.artworkURL else { return (track.id, nil) }
-                            return (track.id, await client.artworkData(at: url))
-                        }
+            await withTaskGroup(of: (String, Data?).self) { group in
+                for track in visibleTracks {
+                    group.addTask {
+                        guard let url = track.artworkURL else { return (track.id, nil) }
+                        return (track.id, await client.artworkData(at: url))
                     }
-                    for await (trackID, data) in group {
-                        guard
-                            !Task.isCancelled,
-                            generation == playlistGeneration,
-                            let data,
-                            let image = NSImage(data: data)
-                        else { continue }
-                        playerView.setTrackArtwork(image, for: trackID)
-                    }
+                }
+                for await (trackID, data) in group {
+                    guard
+                        !Task.isCancelled,
+                        generation == playlistGeneration,
+                        playlists.indices.contains(selectedPlaylistIndex),
+                        playlists[selectedPlaylistIndex].id == playlistID,
+                        let data,
+                        let image = NSImage(data: data)
+                    else { continue }
+                    playerView.setTrackArtwork(image, for: trackID)
                 }
             }
         }

@@ -62,7 +62,13 @@ enum MusicKitLibraryError: LocalizedError, Equatable {
 }
 
 actor MusicKitLibraryClient {
-    private var artworkCache: [URL: Data] = [:]
+    private let artworkCache: NSCache<NSURL, NSData> = {
+        let cache = NSCache<NSURL, NSData>()
+        cache.countLimit = 256
+        cache.totalCostLimit = 64 * 1_024 * 1_024
+        return cache
+    }()
+    private var artworkRequests: [URL: Task<Data?, Never>] = [:]
     private var playlistsByID: [String: Playlist] = [:]
     private var contentCache: [String: LibraryPlaylistContent] = [:]
 
@@ -166,19 +172,32 @@ actor MusicKitLibraryClient {
     }
 
     func artworkData(at url: URL) async -> Data? {
-        if let cached = artworkCache[url] { return cached }
-
-        do {
-            let (data, response) = try await URLSession.shared.data(from: url)
-            guard
-                let response = response as? HTTPURLResponse,
-                (200..<300).contains(response.statusCode),
-                !data.isEmpty
-            else { return nil }
-            artworkCache[url] = data
-            return data
-        } catch {
-            return nil
+        if let cached = artworkCache.object(forKey: url as NSURL) {
+            return cached as Data
         }
+        if let request = artworkRequests[url] {
+            return await request.value
+        }
+
+        let request = Task<Data?, Never> {
+            do {
+                let (data, response) = try await URLSession.shared.data(from: url)
+                guard
+                    let response = response as? HTTPURLResponse,
+                    (200..<300).contains(response.statusCode),
+                    !data.isEmpty
+                else { return nil }
+                return data
+            } catch {
+                return nil
+            }
+        }
+        artworkRequests[url] = request
+        let data = await request.value
+        artworkRequests.removeValue(forKey: url)
+        if let data {
+            artworkCache.setObject(data as NSData, forKey: url as NSURL, cost: data.count)
+        }
+        return data
     }
 }
