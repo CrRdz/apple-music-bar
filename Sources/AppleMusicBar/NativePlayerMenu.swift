@@ -108,8 +108,11 @@ final class NativePlayerMenu: NSObject, NSMenuDelegate {
         menu.minimumWidth = size.width
         contentView.frame.size = size
         contentView.invalidateIntrinsicContentSize()
-        menu.itemChanged(item)
-        menu.update()
+
+        if !isOpen {
+            menu.itemChanged(item)
+            menu.update()
+        }
 
         guard isOpen, let anchor = windowResizeAnchor else { return }
         resizeRevision += 1

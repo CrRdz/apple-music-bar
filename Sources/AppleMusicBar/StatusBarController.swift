@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 
 @MainActor
-final class StatusBarController: NSObject, NSMenuDelegate {
+final class StatusBarController: NSObject {
     private enum UnavailableState: Equatable {
         case notRunning
         case noTrack
@@ -108,15 +108,14 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private func configurePanel() {
         _ = playerMenu
         settingsMenu.autoenablesItems = false
-        settingsMenu.delegate = self
-        populateSettingsMenu(settingsMenu)
+        refreshSettingsMenu()
         playerMenu.configureSettingsItem(
             title: language.localized(.playlists),
             submenu: settingsMenu
         )
         playerMenu.onWillOpen = { [weak self] in
             guard let self else { return }
-            NSApp.activate()
+            self.refreshSettingsMenu(force: true)
             self.playerView.setSurfaceActive(true)
             self.refreshPlaybackPresentation()
             self.updatePlaybackUITimer()
@@ -315,6 +314,9 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             let didChangeTrack = currentTrack?.key != track.key
             let didChangePlaybackState = previousTrack?.state != track.state
             currentTrack = track
+            if previousTrack == nil {
+                refreshSettingsMenu()
+            }
             positionAnchorUptime = ProcessInfo.processInfo.systemUptime
             if didChangeTrack || didChangePlaybackState {
                 playerView.setCurrentTrack(track)
@@ -439,6 +441,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         )
         statusItem.button?.setAccessibilityLabel(language.localized(.accessibilityLyrics))
         renderLibraryState()
+        refreshSettingsMenu()
 
         if let currentTrack {
             updateNowPlayingHeader(for: currentTrack)
@@ -675,6 +678,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         shouldRestorePlaybackFocusAfterPlaylistLoad = false
         playerView.hideTracks()
         playerView.setLibraryState(.loadingLibrary, canRetry: false)
+        refreshSettingsMenu()
 
         libraryTask = Task {
             do {
@@ -685,6 +689,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
                 guard !loadedPlaylists.isEmpty else {
                     libraryState = .empty
                     playerView.setLibraryState(.emptyPlaylists, canRetry: true)
+                    refreshSettingsMenu()
                     return
                 }
 
@@ -700,8 +705,10 @@ final class StatusBarController: NSObject, NSMenuDelegate {
                 )
                 guard !playlists.isEmpty else {
                     playerView.setLibraryState(.noVisiblePlaylists, canRetry: false)
+                    refreshSettingsMenu()
                     return
                 }
+                refreshSettingsMenu()
                 let matchedIndex = indexOfPlaylist(named: currentPlaylistName)
                 let initialIndex = matchedIndex ?? 0
                 playerView.setPlaylists(playlists, selectedIndex: initialIndex)
@@ -711,10 +718,12 @@ final class StatusBarController: NSObject, NSMenuDelegate {
                 guard !Task.isCancelled, generation == libraryGeneration else { return }
                 libraryState = .permissionDenied
                 playerView.setLibraryState(.musicKitAccessRequired, canRetry: true)
+                refreshSettingsMenu()
             } catch {
                 guard !Task.isCancelled, generation == libraryGeneration else { return }
                 libraryState = .failed(error.localizedDescription)
                 playerView.setLibraryState(.libraryUnavailable, canRetry: true)
+                refreshSettingsMenu()
             }
         }
     }
@@ -760,6 +769,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             selectedPlaylistTracks = []
             playerView.hideTracks()
             playerView.setLibraryState(.noVisiblePlaylists, canRetry: false)
+            refreshSettingsMenu()
             return
         }
 
@@ -777,6 +787,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             selectedPlaylistTracks = []
             focusPlaylist(at: nextIndex)
         }
+        refreshSettingsMenu()
     }
 
     private func saveHiddenPlaylistIDs() {
@@ -1028,9 +1039,9 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         }
     }
 
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        guard menu === settingsMenu else { return }
-        populateSettingsMenu(menu)
+    private func refreshSettingsMenu(force: Bool = false) {
+        guard force || !playerMenu.isOpen else { return }
+        populateSettingsMenu(settingsMenu)
     }
 
     private func populateSettingsMenu(_ menu: NSMenu) {
@@ -1178,6 +1189,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         }
         mode.save()
         playerView.setTrackListMode(mode)
+        refreshSettingsMenu()
     }
 
     @objc private func refreshLyrics() {
