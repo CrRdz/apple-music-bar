@@ -138,18 +138,13 @@ jobs:
         run: |
           set -euo pipefail
           DMG_NAME="$APP_NAME-$RELEASE_TAG-macOS-universal.dmg"
-          DMG_ROOT="$PWD/dist/dmg-root"
 
-          rm -rf "$DMG_ROOT"
-          mkdir -p "$DMG_ROOT" release
-          ditto "dist/$APP_NAME.app" "$DMG_ROOT/$APP_NAME.app"
-          ln -s /Applications "$DMG_ROOT/Applications"
-          hdiutil create \
-            -volname "$APP_NAME $RELEASE_TAG" \
-            -srcfolder "$DMG_ROOT" \
-            -format UDZO \
-            -ov \
-            "release/$DMG_NAME"
+          mkdir -p release
+          chmod +x scripts/package-dmg.sh
+          scripts/package-dmg.sh \
+            "dist/$APP_NAME.app" \
+            "release/$DMG_NAME" \
+            "$APP_NAME $RELEASE_TAG"
 
           cd release
           shasum -a 256 "$DMG_NAME" > "$DMG_NAME.sha256"
