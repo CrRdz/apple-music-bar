@@ -107,11 +107,13 @@ jobs:
 
           rm -rf "$APP_PATH"
           mkdir -p "$APP_PATH/Contents/MacOS"
+          mkdir -p "$APP_PATH/Contents/Resources"
           lipo -create \
             "$ARM_BIN_DIR/$APP_NAME" \
             "$X86_BIN_DIR/$APP_NAME" \
             -output "$APP_PATH/Contents/MacOS/$APP_NAME"
           cp Resources/Info.plist "$APP_PATH/Contents/Info.plist"
+          cp Resources/AppIcon.icns "$APP_PATH/Contents/Resources/AppIcon.icns"
           if [[ -n "$MUSICKIT_BUNDLE_ID" ]]; then
             /usr/libexec/PlistBuddy \
               -c "Set :CFBundleIdentifier $MUSICKIT_BUNDLE_ID" \
