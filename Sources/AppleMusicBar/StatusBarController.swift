@@ -86,8 +86,10 @@ final class StatusBarController: NSObject {
     private var marqueeIndex = 0
     private var distributedNotificationObservers: [NSObjectProtocol] = []
     private var workspaceNotificationObservers: [NSObjectProtocol] = []
+    private var isStopped = false
 
     func start() {
+        guard !isStopped else { return }
         configureStatusItem()
         configurePanel()
         playerView.setTrackListMode(trackListMode)
@@ -95,6 +97,49 @@ final class StatusBarController: NSObject {
         loadMusicKitLibrary()
         observeMusicChanges()
         pollMusic()
+    }
+
+    func stop() {
+        guard !isStopped else { return }
+        isStopped = true
+
+        pollingTimer?.invalidate()
+        pollingTimer = nil
+        playbackUITimer?.invalidate()
+        playbackUITimer = nil
+        lyricTransitionTimer?.invalidate()
+        lyricTransitionTimer = nil
+        marqueeTimer?.invalidate()
+        marqueeTimer = nil
+
+        lyricsTask?.cancel()
+        artworkTask?.cancel()
+        playlistNameTask?.cancel()
+        libraryTask?.cancel()
+        playlistContentTask?.cancel()
+        playlistArtworkTask?.cancel()
+        trackArtworkTask?.cancel()
+        playlistIdentityTasks.values.forEach { $0.cancel() }
+        playlistIdentityTasks = [:]
+
+        let distributedCenter = DistributedNotificationCenter.default()
+        distributedNotificationObservers.forEach { distributedCenter.removeObserver($0) }
+        distributedNotificationObservers = []
+
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        workspaceNotificationObservers.forEach { workspaceCenter.removeObserver($0) }
+        workspaceNotificationObservers = []
+
+        statusItem.button?.title = ""
+        statusItem.length = NSStatusItem.variableLength
+        statusItem.menu = nil
+        NSStatusBar.system.removeStatusItem(statusItem)
+    }
+
+    deinit {
+        MainActor.assumeIsolated {
+            stop()
+        }
     }
 
     private func configureStatusItem() {
@@ -569,7 +614,11 @@ final class StatusBarController: NSObject {
         let cleaned = text.replacingOccurrences(of: "\n", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let value = cleaned.isEmpty ? "♪ \(language.localized(.appleMusic))" : cleaned
-        guard value != rawDisplayText else { return }
+        guard value != rawDisplayText else {
+            renderCurrentText()
+            updateMarqueeTimer()
+            return
+        }
 
         rawDisplayText = value
         rawDisplayTextWidth = textWidth(value)
