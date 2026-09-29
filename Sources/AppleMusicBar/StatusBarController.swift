@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ServiceManagement
 
 @MainActor
 final class StatusBarController: NSObject {
@@ -155,7 +156,7 @@ final class StatusBarController: NSObject {
         settingsMenu.autoenablesItems = false
         refreshSettingsMenu()
         playerMenu.configureSettingsItem(
-            title: language.localized(.playlists),
+            title: language.localized(.settings),
             submenu: settingsMenu
         )
         playerMenu.onWillOpen = { [weak self] in
@@ -473,7 +474,7 @@ final class StatusBarController: NSObject {
 
     private func refreshLocalizedPresentation() {
         playerView.updateLocalization(language)
-        playerMenu.updateSettingsTitle(language.localized(.playlists))
+        playerMenu.updateSettingsTitle(language.localized(.settings))
         playerView.updatePlaybackAccessibility(
             previous: language.localized(.previous),
             play: language.localized(.play),
@@ -1191,6 +1192,32 @@ final class StatusBarController: NSObject {
         languageItem.submenu = languageMenu
         menu.addItem(languageItem)
 
+        menu.addItem(.separator())
+        let loginStatus = SMAppService.mainApp.status
+        let launchAtLoginItem = NSMenuItem(
+            title: language.localized(.launchAtLogin),
+            action: #selector(toggleLaunchAtLogin),
+            keyEquivalent: ""
+        )
+        launchAtLoginItem.target = self
+        switch loginStatus {
+        case .enabled: launchAtLoginItem.state = .on
+        case .requiresApproval: launchAtLoginItem.state = .mixed
+        default: launchAtLoginItem.state = .off
+        }
+        menu.addItem(launchAtLoginItem)
+
+        if loginStatus == .requiresApproval {
+            let approvalItem = NSMenuItem(
+                title: language.localized(.loginApprovalRequired),
+                action: #selector(openLoginItemSettings),
+                keyEquivalent: ""
+            )
+            approvalItem.target = self
+            menu.addItem(approvalItem)
+        }
+        menu.addItem(.separator())
+
         let openMusicItem = NSMenuItem(
             title: language.localized(.openAppleMusic),
             action: #selector(openMusic),
@@ -1239,6 +1266,38 @@ final class StatusBarController: NSObject {
         mode.save()
         playerView.setTrackListMode(mode)
         refreshSettingsMenu()
+    }
+
+    @objc private func toggleLaunchAtLogin() {
+        let service = SMAppService.mainApp
+        do {
+            switch service.status {
+            case .enabled, .requiresApproval:
+                try service.unregister()
+            default:
+                try service.register()
+            }
+            if service.status == .requiresApproval {
+                SMAppService.openSystemSettingsLoginItems()
+            }
+        } catch {
+            if service.status == .requiresApproval {
+                SMAppService.openSystemSettingsLoginItems()
+            } else {
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = language.localized(.loginChangeFailed)
+                alert.informativeText = language.localized(.loginChangeFailedMessage)
+                alert.addButton(withTitle: language.localized(.ok))
+                NSApp.activate(ignoringOtherApps: true)
+                alert.runModal()
+            }
+        }
+        refreshSettingsMenu(force: true)
+    }
+
+    @objc private func openLoginItemSettings() {
+        SMAppService.openSystemSettingsLoginItems()
     }
 
     @objc private func refreshLyrics() {

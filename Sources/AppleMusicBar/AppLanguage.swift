@@ -108,6 +108,12 @@ enum AppLanguage: String, CaseIterable, Sendable {
         .hideLyrics: "关闭歌词",
         .loadingLyrics: "正在载入歌词…",
         .lyricsUnavailable: "暂时没有可用歌词",
+        .settings: "设置",
+        .launchAtLogin: "开机自启",
+        .loginApprovalRequired: "前往系统设置允许开机自启…",
+        .loginChangeFailed: "无法更改开机自启",
+        .loginChangeFailedMessage: "请将应用放入“应用程序”文件夹后重试，也可以在系统设置的“登录项”中检查权限。",
+        .ok: "好",
         .language: "语言",
         .followSystem: "跟随系统",
         .openAppleMusic: "打开 Apple Music",
@@ -156,6 +162,12 @@ enum AppLanguage: String, CaseIterable, Sendable {
         .hideLyrics: "關閉歌詞",
         .loadingLyrics: "正在載入歌詞…",
         .lyricsUnavailable: "暫時沒有可用歌詞",
+        .settings: "設定",
+        .launchAtLogin: "開機自啟",
+        .loginApprovalRequired: "前往系統設定允許開機自啟…",
+        .loginChangeFailed: "無法更改開機自啟",
+        .loginChangeFailedMessage: "請將應用程式放入「應用程式」資料夾後重試，也可以在系統設定的「登入項目」中檢查權限。",
+        .ok: "好",
         .language: "語言",
         .followSystem: "跟隨系統",
         .openAppleMusic: "開啟 Apple Music",
@@ -204,6 +216,12 @@ enum AppLanguage: String, CaseIterable, Sendable {
         .hideLyrics: "Hide Lyrics",
         .loadingLyrics: "Loading lyrics…",
         .lyricsUnavailable: "No lyrics available",
+        .settings: "Settings",
+        .launchAtLogin: "Launch at Login",
+        .loginApprovalRequired: "Allow Launch at Login in System Settings…",
+        .loginChangeFailed: "Unable to Change Launch at Login",
+        .loginChangeFailedMessage: "Move the app to Applications and try again, or check permissions under Login Items in System Settings.",
+        .ok: "OK",
         .language: "Language",
         .followSystem: "Follow System",
         .openAppleMusic: "Open Apple Music",
@@ -253,6 +271,12 @@ enum AppStringKey: Hashable {
     case hideLyrics
     case loadingLyrics
     case lyricsUnavailable
+    case settings
+    case launchAtLogin
+    case loginApprovalRequired
+    case loginChangeFailed
+    case loginChangeFailedMessage
+    case ok
     case language
     case followSystem
     case openAppleMusic
